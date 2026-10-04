@@ -304,6 +304,10 @@ class StdioPluginServer:
         Raises:
             InvalidRequest: The method is unknown or invalid for the current state.
         """
+        if frame.method == "ping":
+            # Liveness probe for the Host supervisor; also serves as the
+            # capability probe for future non-Python runners.
+            return {"protocol_version": PROTOCOL_VERSION}
         if frame.method == "initialize":
             return await self._initialize(frame)
         if frame.method == "invoke_tool":

@@ -192,7 +192,7 @@ class Peer:
                             message="request was cancelled",
                         )
                     )
-        except Exception as exc:
+        except BaseException as exc:  # noqa: BLE001 - plugin code may raise SystemExit
             code = (
                 exc.code
                 if isinstance(exc, AstrBotSDKError)

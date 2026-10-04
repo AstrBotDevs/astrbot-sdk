@@ -386,6 +386,28 @@ class StdioPluginClient:
         )
         return decode_value(result)
 
+    async def ping(self) -> Any:
+        """Probe Runner liveness; returns its protocol version payload."""
+        return await self._request("ping", {})
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the Runner process is alive."""
+        return self._process is not None and self._process.returncode is None
+
+    async def wait_exited(self) -> int | None:
+        """Wait for the Runner process to exit and return its exit code."""
+        process = self._process
+        if process is None:
+            return None
+        return await process.wait()
+
+    def kill_process(self) -> None:
+        """Force-kill the Runner process when it is unresponsive."""
+        process = self._process
+        if process is not None and process.returncode is None:
+            process.kill()
+
     async def close(self) -> None:
         """Shut down the Runner and release process resources."""
         process = self._process

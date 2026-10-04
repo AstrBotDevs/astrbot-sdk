@@ -22,8 +22,14 @@
   插件继续使用 core 解释器，零成本。dynamic dependencies 响报。
   后续：dashboard 安装流接入（装插件时即建 venv 并展示安装日志）、
   插件卸载时清理 venv 目录。
-- [ ] **Runner supervisor**：子进程崩溃后无重启、无健康检查、无退避。
-  需要 supervisor 层（崩溃检测、重启策略、连续失败熔断）。
+- [x] **Runner supervisor**（已完成）：`sdk_bridge/supervisor.py` 的
+  `RunnerSupervisor` 接管 client 生命周期——意外退出按 1s→30s 指数
+  退避重启（60s 稳定后计数清零），60s 窗口 5 次崩溃打开熔断
+  （插件保持注册、调用即报 CircuitOpenError、registry 标记错误），
+  协议级 ping（连续 3 次无应答 kill 走崩溃路径），主动 stop 不重启。
+  配套协议修复：Runner 新增 ping 方法；Peer 请求处理捕获
+  BaseException——插件代码的 SystemExit 不再让握手静默挂死
+  （曾导致启动失败必等 10s 超时）。
 - [ ] **用户授权流**：目前桥接自动授予插件声明的全部 capability（竖切临时
   行为）。需要用户在安装/启用时的授权 UI 与持久化授权表，运行只授予
   声明 ∩ 授权。
