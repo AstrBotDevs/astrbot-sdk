@@ -241,7 +241,9 @@ class StdioPluginServer:
                             raise InvalidRequest(f"duplicate invocation id: {frame.id}")
                         acknowledgements: asyncio.Queue[int] = asyncio.Queue()
                         task = asyncio.create_task(
-                            self._run_invocation(frame, acknowledgements)
+                            self._run_web_invocation(frame, acknowledgements)
+                            if frame.params.get("web")
+                            else self._run_invocation(frame, acknowledgements)
                         )
                         self._invocations[frame.id] = (task, acknowledgements)
                     elif await self._peer.receive(frame):
@@ -462,6 +464,21 @@ class StdioPluginServer:
                     "schema_version": loaded.metadata.schema_version,
                 },
                 "handlers": handlers,
+                "web_routes": [
+                    {
+                        "route": route.route,
+                        "methods": list(route.methods),
+                        "description": route.description,
+                    }
+                    for route in getattr(
+                        getattr(loaded.instance, "ctx", None),
+                        "web",
+                        None,
+                    ).routes
+                ]
+                if getattr(getattr(loaded.instance, "ctx", None), "web", None)
+                is not None
+                else [],
                 "capabilities": list(
                     getattr(loaded.instance, "ctx", None).capabilities
                     if getattr(loaded.instance, "ctx", None) is not None
@@ -525,6 +542,58 @@ class StdioPluginServer:
             },
         )
         return decode_value(result)
+
+    async def _run_web_invocation(
+        self,
+        frame: RequestFrame,
+        acknowledgements: asyncio.Queue[int],
+    ) -> None:
+        """Invoke one web route and stream the response with backpressure.
+
+        Every yielded item (response info and each body chunk) is
+        acknowledged by the Host before the next is produced, so slow
+        clients throttle the plugin's generator (SSE, large files).
+        """
+        try:
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            from ..web import WebRequestInfo
+
+            request = decode_value(frame.params.get("request"))
+            if not isinstance(request, WebRequestInfo):
+                raise InvalidRequest("web request must be a WebRequestInfo")
+            sequence = 0
+            async for item in self.loaded_plugin.invoke_web(request):
+                sequence += 1
+                await self._send(
+                    YieldFrame(
+                        id=frame.id,
+                        sequence=sequence,
+                        result=encode_value(item),
+                    ),
+                )
+                acknowledged_sequence = await acknowledgements.get()
+                if acknowledged_sequence != sequence:
+                    raise InvalidRequest(
+                        "web stream acknowledgement sequence does not match"
+                    )
+            await self._send(ResponseFrame(id=frame.id, result=None))
+        except asyncio.CancelledError:
+            await self._send(
+                ErrorFrame(
+                    id=frame.id,
+                    code="CANCELLED",
+                    message="web invocation was cancelled",
+                ),
+            )
+            raise
+        except Exception as exc:
+            code = (
+                exc.code if isinstance(exc, AstrBotSDKError) else "PLUGIN_RUNTIME_ERROR"
+            )
+            await self._send(ErrorFrame(id=frame.id, code=code, message=str(exc)))
+        finally:
+            self._invocations.pop(frame.id, None)
 
     async def _run_invocation(
         self,

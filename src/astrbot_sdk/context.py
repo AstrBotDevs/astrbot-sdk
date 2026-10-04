@@ -17,6 +17,7 @@ from .protocol_registry import register_protocol_dataclass
 from .render import RenderService
 from .services import AssetService, MessageService, PluginStorage
 from .tools import ToolService
+from .web import WebService
 
 _AMBIENT_UMO: ContextVar[Any] = ContextVar("ambient_umo", default=None)
 _AMBIENT_EVENT: ContextVar[Any] = ContextVar("ambient_event", default=None)
@@ -63,6 +64,7 @@ class PluginContext[ConfigT]:
     render: RenderService = field(init=False)
     tools: ToolService = field(init=False)
     llm: LLMService = field(init=False)
+    web: WebService = field(init=False)
     _host_capability_invoker: HostCapabilityInvoker | None = field(
         default=None,
         repr=False,
@@ -87,6 +89,7 @@ class PluginContext[ConfigT]:
         self.render = RenderService(self)
         self.tools = ToolService(self)
         self.llm = LLMService(self)
+        self.web = WebService(self)
 
     def _register_dynamic_tool(
         self,

@@ -80,6 +80,7 @@ class PluginHandshake:
     schema_version: int
     handlers: tuple[HandlerDescriptor, ...]
     capabilities: tuple[str, ...]
+    web_routes: tuple[dict[str, Any], ...] = ()
 
 
 class StdioPluginClient:
@@ -309,6 +310,70 @@ class StdioPluginClient:
                     yield result
                     if stopped:
                         return
+                    await self._send(
+                        AckFrame(
+                            id=invocation_id,
+                            sequence=frame.sequence,
+                        )
+                    )
+                elif isinstance(frame, ResponseFrame):
+                    completed = True
+                    return
+                elif isinstance(frame, ErrorFrame):
+                    completed = True
+                    raise RemotePluginError(frame.code, frame.message)
+                else:
+                    raise InvalidRequest(
+                        f"unexpected invocation frame: {type(frame).__name__}"
+                    )
+        finally:
+            self._streams.pop(invocation_id, None)
+            if (
+                not completed
+                and self._process is not None
+                and self._process.returncode is None
+            ):
+                with contextlib.suppress(HostUnavailable):
+                    await self._send(CancelFrame(id=invocation_id))
+
+    async def invoke_web(
+        self,
+        request: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Invoke one remote web route and stream the response.
+
+        Yields the response info first (``{"info": WebResponseInfo}``),
+        then body chunks (``{"chunk": bytes}``); each consumed item sends
+        the acknowledgement that resumes the remote stream (backpressure).
+        """
+        if self._process is None or self._process.returncode is not None:
+            raise HostUnavailable("stdio plugin Runner is not running")
+
+        invocation_id = f"host-invoke:{uuid.uuid4().hex}"
+        queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
+        self._streams[invocation_id] = queue
+        completed = False
+        expected_sequence = 0
+        try:
+            await self._send(
+                RequestFrame(
+                    id=invocation_id,
+                    method="invoke",
+                    params={
+                        "web": True,
+                        "request": encode_value(request),
+                    },
+                )
+            )
+            while True:
+                frame = await queue.get()
+                if isinstance(frame, Exception):
+                    raise frame
+                if isinstance(frame, YieldFrame):
+                    expected_sequence += 1
+                    if frame.sequence != expected_sequence:
+                        raise InvalidRequest("remote yield sequence does not match")
+                    yield decode_value(frame.result)
                     await self._send(
                         AckFrame(
                             id=invocation_id,
@@ -602,6 +667,12 @@ class StdioPluginClient:
         ):
             raise InvalidRequest("initialize plugin metadata is invalid")
 
+        web_routes = result.get("web_routes")
+        if web_routes is None:
+            web_routes = []
+        if not isinstance(web_routes, list):
+            raise InvalidRequest("initialize web_routes must be a list")
+
         handlers: list[HandlerDescriptor] = []
         try:
             for raw_handler in raw_handlers:
@@ -643,6 +714,7 @@ class StdioPluginClient:
             schema_version=schema_version,
             handlers=tuple(handlers),
             capabilities=tuple(raw_capabilities),
+            web_routes=tuple(dict(item) for item in web_routes),
         )
 
     async def _send(

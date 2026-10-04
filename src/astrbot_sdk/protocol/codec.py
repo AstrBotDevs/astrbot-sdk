@@ -66,6 +66,10 @@ def _coerce_value(annotation: Any, raw: Any) -> Any:
     ):
         # Nested registered dataclass, e.g. AssetRef inside an Any-typed field.
         return _decode_dataclass(_PROTOCOL_DATACLASSES[raw["$type"]], raw["value"])
+    if isinstance(raw, dict) and set(raw) == {"$type", "value"} and raw["$type"] == "bytes":
+        import base64
+
+        return base64.b64decode(str(raw["value"]).encode("ascii"))
     origin = get_origin(annotation)
     if origin is tuple:
         (item_type,) = get_args(annotation)[:1]
@@ -155,6 +159,13 @@ def encode_value(value: Any) -> JSONValue:
     """
     if value is None or isinstance(value, bool | int | float | str):
         return value
+    if isinstance(value, bytes | bytearray):
+        import base64
+
+        return {
+            "$type": "bytes",
+            "value": base64.b64encode(bytes(value)).decode("ascii"),
+        }
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Enum):
@@ -220,6 +231,12 @@ def decode_value(value: JSONValue) -> Any:
         if set(value) == {"$type", "value"}:
             value_type = value["$type"]
             payload = value["value"]
+            if value_type == "bytes":
+                import base64
+
+                if not isinstance(payload, str):
+                    raise InvalidRequest("bytes payload must be base64 text")
+                return base64.b64decode(payload.encode("ascii"))
             if value_type == "MessageEvent":
                 if not isinstance(payload, dict):
                     raise InvalidRequest("MessageEvent payload must be an object")

@@ -31,6 +31,7 @@ from ..errors import (
     CapabilityDenied,
     InvalidHandlerResult,
     InvalidPluginDefinition,
+    InvalidRequest,
     NotFound,
     PluginImportError,
 )
@@ -228,6 +229,36 @@ class LoadedPlugin:
             return self._registrations_by_id[handler_id]
         except KeyError as exc:
             raise NotFound(f"handler not found: {handler_id}") from exc
+
+    async def invoke_web(self, request: Any) -> AsyncIterator[dict]:
+        """Invoke one web route handler and stream the response.
+
+        Yields the response info first, then body chunks, for the Host to
+        replay as an HTTP response.
+        """
+        from ..web import WebRequest, normalize_web_result
+
+        registration = next(
+            (
+                item
+                for item in self.instance.ctx.web.routes
+                if item.route == request.route
+            ),
+            None,
+        )
+        if registration is None:
+            raise NotFound(f"web route not found: {request.route}")
+        if request.method.upper() not in registration.methods:
+            raise InvalidRequest(
+                f"method {request.method} not allowed for {request.route}"
+            )
+        facade = WebRequest(request, self.instance.ctx)
+        outcome = registration.handler(facade, **request.path_params)
+        result = await outcome if inspect.isawaitable(outcome) else outcome
+        info, chunks = await normalize_web_result(result)
+        yield {"info": info}
+        async for chunk in chunks:
+            yield {"chunk": chunk}
 
     async def _invoke_lifecycle(
         self,
