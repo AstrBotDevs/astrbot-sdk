@@ -7,9 +7,17 @@
 - [ ] **子进程环境变量白名单**：`StdioPluginClient` 目前用 `os.environ.copy()`
   启动 Runner，core 环境里的 LLM API key、数据库凭证对插件进程全部可见。
   改为白名单传递（PATH、LANG、Python 运行时必需项 + 显式声明项）。
-- [ ] **per-plugin 依赖环境（venv）**：Runner 目前直接使用 core 的
-  `sys.executable`，插件第三方依赖必须装进 core 的 venv，隔离名存实亡。
-  需要 per-plugin venv + requirements.txt 安装方案（有设计决策待讨论）。
+- [x] **per-plugin 依赖环境（venv）**：`sdk_bridge/venv.py` 已实现。
+  插件在 pyproject.toml（`[project.dependencies]`，优先）或
+  requirements.txt 声明依赖；bridge 启动时创建
+  `data/plugin_venvs/{root_dir_name}`（`--system-site-packages` +
+  `site.addsitedir` .pth 链接 core venv 的 site-packages，editable
+  安装的 astrbot_sdk 亦可见），经 `python -m uv pip`（core 已依赖 uv
+  wheel，用户机无需预装 uv；缺失时回退 tomllib + pip）安装，
+  内容指纹（声明 + Python 版本）命中标记则跳过重装。无依赖声明的
+  插件继续使用 core 解释器，零成本。dynamic dependencies 响报。
+  后续：dashboard 安装流接入（装插件时即建 venv 并展示安装日志）、
+  插件卸载时清理 venv 目录。
 - [ ] **Runner supervisor**：子进程崩溃后无重启、无健康检查、无退避。
   需要 supervisor 层（崩溃检测、重启策略、连续失败熔断）。
 - [ ] **用户授权流**：目前桥接自动授予插件声明的全部 capability（竖切临时
