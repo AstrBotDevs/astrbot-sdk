@@ -140,6 +140,11 @@ def tool_params_schema(
 
     params: list[ToolParam] = []
     for param in parameters:
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
         if is_tool_context_param(param):
             raise InvalidPluginDefinition(
                 "the ToolCallContext injection must be the first tool parameter"

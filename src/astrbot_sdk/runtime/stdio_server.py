@@ -410,15 +410,17 @@ class StdioPluginServer:
                         "stage": spec.kind.value.removeprefix("hook."),
                     }
                 elif spec.kind is HandlerKind.TOOL:
+                    precomputed = getattr(
+                        registration.handler,
+                        "__tool_params__",
+                        None,
+                    )
                     details = {
                         "name": spec.tool_name,
                         "description": spec.description,
-                        "params": getattr(
-                            registration.handler,
-                            "__tool_params__",
-                            None,
-                        )
-                        or [
+                        "params": precomputed
+                        if precomputed is not None
+                        else [
                             {
                                 "name": param.name,
                                 "type": param.type,

@@ -359,6 +359,11 @@ def _legacy_tool_params(method: Any) -> list[dict[str, Any]]:
     if parameters and parameters[0].name == "self":
         parameters = parameters[1:]
     for param in parameters:
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
         if param.name in {"event", "context"}:
             continue
         annotation = param.annotation
