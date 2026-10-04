@@ -1,0 +1,15 @@
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+dist/
+.DS_Store
+
+# runtime artifacts from local plugin runs
+plugin_data/
+config.json
+dpcq_data/
+smart_memory/
+werewolf_temp/
+/data/*
+!/data/sdk-plugins/

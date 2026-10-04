@@ -1,0 +1,15 @@
+schema_version: 2
+
+name: astrbot_plugin_hello_sdk
+display_name: Hello SDK
+desc: Minimal AstrBot SDK plugin
+author: AstrBot
+version: 1.0.0
+astrbot_version: ">=5.0,<6"
+
+runtime:
+  api: sdk
+  entrypoint: main:HelloPlugin
+  sdk_version: ">=0.1,<0.2"
+
+capabilities: {}

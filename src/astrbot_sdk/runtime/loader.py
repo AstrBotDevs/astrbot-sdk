@@ -1,0 +1,549 @@
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import importlib
+import importlib.machinery
+import inspect
+import logging
+import os
+import sys
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+
+from .._version import __version__
+from ..capabilities import DEFAULT_CAPABILITY_IDS, CapabilityGrant, CapabilitySet
+from ..context import (
+    HostCapabilityInvoker,
+    HostCapabilityStreamInvoker,
+    PluginContext,
+    PluginInfo,
+    RuntimeMode,
+)
+from ..errors import (
+    CapabilityDenied,
+    InvalidHandlerResult,
+    InvalidPluginDefinition,
+    NotFound,
+    PluginImportError,
+)
+from ..events import MessageEvent
+from ..lifecycle import ConfigChangedEvent, ShutdownEvent
+from ..plugin import Plugin
+from ..registration import (
+    HandlerKind,
+    HandlerRegistration,
+    discover_handlers,
+)
+from ..results import EventResult, MessageResult, Propagation, message_result
+from ..services import prepare_outbound_chain
+from ..tools import ToolCallContext
+from .metadata import PluginMetadata, load_metadata
+
+
+def _load_metadata_for_legacy(plugin_root: Path) -> PluginMetadata:
+    """Read legacy metadata.yaml into the metadata shape used by the loader."""
+    import yaml
+
+    from .metadata import (
+        CapabilityDeclarations,
+        PluginAPIFamily,
+        PluginMetadata,
+        RuntimeMetadata,
+    )
+
+    data = (
+        yaml.safe_load(
+            (plugin_root / "metadata.yaml").read_text(encoding="utf-8"),
+        )
+        or {}
+    )
+    name = str(data.get("name") or plugin_root.name)
+    author = str(data.get("author") or "unknown")
+    return PluginMetadata(
+        schema_version=1,
+        name=name,
+        author=author,
+        version=str(data.get("version") or "0.0.0"),
+        desc=str(data.get("desc") or ""),
+        runtime=RuntimeMetadata(
+            api=PluginAPIFamily.LEGACY,
+            entrypoint="main",
+            module="main",
+            plugin_class="",
+            sdk_version="",
+        ),
+        capabilities=CapabilityDeclarations(),
+    )
+
+
+def _default_data_dir(metadata: PluginMetadata) -> Path:
+    """Resolve the Runner-local persistent directory for one plugin.
+
+    Args:
+        metadata: Loaded plugin metadata.
+
+    Returns:
+        Directory below ASTRBOT_SDK_DATA_DIR or the current working directory.
+    """
+    base = os.environ.get("ASTRBOT_SDK_DATA_DIR")
+    root = Path(base) if base else Path.cwd() / "data" / "sdk-plugins"
+    return root / metadata.plugin_id.replace("/", "_")
+
+
+def _is_event_parameter(param: inspect.Parameter) -> bool:
+    """Check whether one parameter is the MessageEvent injection slot."""
+    annotation = param.annotation
+    if annotation is MessageEvent:
+        return True
+    import types
+    import typing
+
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        if MessageEvent in typing.get_args(annotation):
+            return True
+    if isinstance(annotation, str):
+        name = annotation.rsplit(".", 1)[-1].removesuffix(" | None")
+        if name == "MessageEvent":
+            return True
+    return param.name == "event" and annotation is inspect.Parameter.empty
+
+
+def _is_tool_context_param(param: inspect.Parameter) -> bool:
+    """Check whether one parameter is the ToolCallContext injection slot."""
+    annotation = param.annotation
+    if annotation is ToolCallContext:
+        return True
+    if isinstance(annotation, str):
+        return annotation.rsplit(".", 1)[-1] == "ToolCallContext"
+    return param.name == "call" and annotation is inspect.Parameter.empty
+
+
+def _plugin_namespace(plugin_root: Path) -> str:
+    digest = hashlib.sha256(str(plugin_root.resolve()).encode()).hexdigest()[:16]
+    return f"_astrbot_plugin_{digest}"
+
+
+def _install_namespace(plugin_root: Path) -> str:
+    namespace = _plugin_namespace(plugin_root)
+    if namespace in sys.modules:
+        return namespace
+
+    module = ModuleType(namespace)
+    module.__path__ = [str(plugin_root)]  # type: ignore[attr-defined]
+    module.__package__ = namespace
+    module.__spec__ = importlib.machinery.ModuleSpec(
+        namespace,
+        loader=None,
+        is_package=True,
+    )
+    sys.modules[namespace] = module
+    return namespace
+
+
+def _resolve_entrypoint(
+    metadata: PluginMetadata,
+    plugin_root: Path,
+) -> type[Plugin[Any]]:
+    namespace = _install_namespace(plugin_root)
+    module_name = f"{namespace}.{metadata.runtime.module}"
+    importlib.invalidate_caches()
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise PluginImportError(
+            f"failed to import plugin module {metadata.runtime.module!r}: {exc}"
+        ) from exc
+
+    entrypoint: Any = module
+    try:
+        for attribute in metadata.runtime.plugin_class.split("."):
+            entrypoint = getattr(entrypoint, attribute)
+    except AttributeError as exc:
+        raise PluginImportError(
+            f"plugin entrypoint {metadata.runtime.entrypoint!r} was not found"
+        ) from exc
+
+    if not inspect.isclass(entrypoint) or not issubclass(entrypoint, Plugin):
+        raise InvalidPluginDefinition(
+            f"{metadata.runtime.entrypoint!r} must point to a Plugin subclass"
+        )
+    return entrypoint
+
+
+def _filter_grants(
+    metadata: PluginMetadata,
+    grants: CapabilitySet,
+) -> CapabilitySet:
+    missing = metadata.capabilities.required_ids - set(grants)
+    if missing:
+        capability_id = sorted(missing)[0]
+        raise CapabilityDenied(f"required capability was not granted: {capability_id}")
+    declared = metadata.capabilities.all_ids
+    return CapabilitySet(
+        [grant for grant in grants.values() if grant.id in declared]
+        + [
+            CapabilityGrant(id=capability_id)
+            for capability_id in sorted(DEFAULT_CAPABILITY_IDS - declared)
+        ]
+    )
+
+
+def _normalize_result(value: Any) -> EventResult | None:
+    if value is None or isinstance(value, EventResult):
+        return value
+    try:
+        return message_result(value)
+    except (TypeError, ValueError) as exc:
+        raise InvalidHandlerResult(
+            f"handler returned unsupported value {type(value)!r}"
+        ) from exc
+
+
+@dataclass(slots=True)
+class LoadedPlugin:
+    metadata: PluginMetadata
+    instance: Plugin[Any]
+    registrations: tuple[HandlerRegistration, ...]
+    _registrations_by_id: Mapping[str, HandlerRegistration] = field(
+        init=False,
+        repr=False,
+    )
+    _started: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._registrations_by_id = {
+            registration.id: registration for registration in self.registrations
+        }
+
+    def get_handler(self, handler_id: str) -> HandlerRegistration:
+        try:
+            return self._registrations_by_id[handler_id]
+        except KeyError as exc:
+            raise NotFound(f"handler not found: {handler_id}") from exc
+
+    async def _invoke_lifecycle(
+        self,
+        kind: HandlerKind,
+        event: object | None = None,
+    ) -> None:
+        registration = next(
+            (item for item in self.registrations if item.spec.kind is kind),
+            None,
+        )
+        if registration is None:
+            return
+
+        parameters = inspect.signature(registration.handler).parameters
+        if event is None:
+            outcome = registration.handler()
+        elif len(parameters) == 0:
+            outcome = registration.handler()
+        else:
+            outcome = registration.handler(event)
+        if inspect.isasyncgen(outcome):
+            await outcome.aclose()
+            raise InvalidHandlerResult(f"{kind.value} lifecycle handler cannot yield")
+        result = await outcome
+        if result is not None:
+            raise InvalidHandlerResult(
+                f"{kind.value} lifecycle handler must return None"
+            )
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        await self._invoke_lifecycle(HandlerKind.LIFECYCLE_STARTUP)
+        self._started = True
+
+    async def reconfigure(self, config: Any) -> None:
+        previous = self.instance.ctx.config
+        self.instance.ctx.config = config
+        await self._invoke_lifecycle(
+            HandlerKind.LIFECYCLE_CONFIG_CHANGED,
+            ConfigChangedEvent(previous=previous, current=config),
+        )
+
+    async def shutdown(self, *, deadline: datetime | None = None) -> None:
+        if not self._started:
+            return
+        try:
+            await self._invoke_lifecycle(
+                HandlerKind.LIFECYCLE_SHUTDOWN,
+                ShutdownEvent(deadline=deadline),
+            )
+        finally:
+            self._started = False
+
+    async def invoke_tool(
+        self,
+        handler_id: str,
+        call: ToolCallContext,
+        args: Mapping[str, Any],
+    ) -> Any:
+        """Invoke one tool handler and return its JSON-safe result.
+
+        Args:
+            handler_id: Registered tool handler ID.
+            call: Tool call context for injection.
+            args: Tool arguments supplied by the LLM.
+
+        Returns:
+            Handler return value (str, JSON value, or None).
+
+        Raises:
+            InvalidHandlerResult: The handler yields or returns an awaitable
+                instead of a plain value.
+        """
+        handler: Callable[..., Any] | None = self.instance.ctx.dynamic_tools.get(
+            handler_id,
+        )
+        if handler is None:
+            registration = self.get_handler(handler_id)
+            if registration.spec.kind is not HandlerKind.TOOL:
+                raise InvalidPluginDefinition(
+                    f"handler {handler_id!r} is not a tool handler"
+                )
+            handler = registration.handler
+
+        umo = call.umo or (call.event.umo if call.event is not None else None)
+        token = self.instance.ctx._bind_ambient_umo(umo) if umo is not None else None
+        event_token = (
+            self.instance.ctx._bind_ambient_event(call.event)
+            if call.event is not None
+            else None
+        )
+        try:
+            signature = inspect.signature(handler)
+            parameters = list(signature.parameters.values())
+            kwargs = dict(args)
+            if parameters and _is_tool_context_param(parameters[0]):
+                # Attach the live plugin context; it never crosses the protocol.
+                call = dataclasses.replace(call, ctx=self.instance.ctx)
+                outcome = handler(call, **kwargs)
+            else:
+                outcome = handler(**kwargs)
+
+            if inspect.isasyncgen(outcome):
+                await outcome.aclose()
+                raise InvalidHandlerResult("tool handler cannot yield results")
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult(
+                    f"tool handler {handler_id!r} did not return an awaitable"
+                )
+            return await outcome
+        finally:
+            if token is not None:
+                self.instance.ctx._reset_ambient_umo(token)
+            if event_token is not None:
+                self.instance.ctx._reset_ambient_event(event_token)
+
+    async def invoke_hook(
+        self,
+        handler_id: str,
+        event: MessageEvent | None,
+        stage_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Invoke one Pipeline hook handler.
+
+        The stage DTO is rebuilt as a tracked object; the handler mutates it
+        and optionally returns a Decision. Recorded write operations are
+        returned for the Host to apply.
+
+        Args:
+            handler_id: Registered hook handler ID.
+            event: Triggering event, or None for plugin-initiated calls.
+            stage_payload: Snapshot fields of the stage DTO.
+
+        Returns:
+            Dict with write ops and an optional decision.
+        """
+        from ..hooks import build_stage_dto
+        from ..registration import _HOOK_KINDS
+
+        registration = self.get_handler(handler_id)
+        kind = registration.spec.kind
+        if kind not in _HOOK_KINDS:
+            raise InvalidPluginDefinition(
+                f"handler {handler_id!r} is not a hook handler"
+            )
+        stage = kind.value.removeprefix("hook.")
+        dto = build_stage_dto(stage, stage_payload)
+
+        parameters = list(inspect.signature(registration.handler).parameters.values())
+        args: list[Any] = []
+        if parameters and _is_event_parameter(parameters[0]):
+            args.append(event)
+            parameters = parameters[1:]
+        if parameters and dto is not None:
+            args.append(dto)
+
+        outcome = registration.handler(*args)
+        if inspect.isasyncgen(outcome):
+            await outcome.aclose()
+            raise InvalidHandlerResult("hook handler cannot yield results")
+        if not inspect.isawaitable(outcome):
+            raise InvalidHandlerResult(
+                f"hook handler {handler_id!r} did not return an awaitable"
+            )
+        result = await outcome
+        if result is not None:
+            raise InvalidHandlerResult(f"hook handler {handler_id!r} must return None")
+        from ..hooks import HookDTO
+
+        return {
+            "writes": dto._write_ops() if isinstance(dto, HookDTO) else [],
+        }
+
+    async def _prepare_result(self, result: EventResult | None) -> EventResult | None:
+        # Upload local media sources so outbound chains only carry asset
+        # references or public URLs across the protocol.
+        if isinstance(result, MessageResult):
+            prepared = await prepare_outbound_chain(
+                result.message,
+                self.instance.ctx.assets,
+            )
+            if prepared is not result.message:
+                return MessageResult(
+                    propagation=result.propagation,
+                    message=prepared,
+                    quote=result.quote,
+                )
+        return result
+
+    async def invoke(
+        self,
+        handler_id: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> AsyncIterator[EventResult | None]:
+        registration = self.get_handler(handler_id)
+        if registration.spec.kind.value.startswith("lifecycle."):
+            raise InvalidPluginDefinition(
+                "lifecycle handlers cannot be invoked as event handlers"
+            )
+
+        # Bind the triggering session so LLM provider selection defaults to
+        # the provider this session selected.
+        event = next(
+            (arg for arg in args if isinstance(arg, MessageEvent)),
+            None,
+        )
+        umo = event.umo if event is not None else None
+        token = self.instance.ctx._bind_ambient_umo(umo) if umo is not None else None
+        event_token = (
+            self.instance.ctx._bind_ambient_event(event) if event is not None else None
+        )
+        try:
+            outcome = registration.handler(*args, **kwargs)
+            if inspect.isasyncgen(outcome):
+                try:
+                    async for value in outcome:
+                        result = _normalize_result(value)
+                        if (
+                            result is not None
+                            and result.propagation is Propagation.STOP
+                        ):
+                            await outcome.aclose()
+                            yield await self._prepare_result(result)
+                            return
+                        yield await self._prepare_result(result)
+                finally:
+                    await outcome.aclose()
+                return
+
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult(
+                    f"handler {handler_id!r} did not return an awaitable"
+                )
+            yield await self._prepare_result(_normalize_result(await outcome))
+        finally:
+            if token is not None:
+                self.instance.ctx._reset_ambient_umo(token)
+            if event_token is not None:
+                self.instance.ctx._reset_ambient_event(event_token)
+
+
+def load_plugin(
+    plugin_root: str | Path,
+    *,
+    config: Any = None,
+    granted_capabilities: CapabilitySet | None = None,
+    runtime_mode: RuntimeMode = RuntimeMode.ISOLATED,
+    logger: logging.Logger | None = None,
+    host_capability_invoker: HostCapabilityInvoker | None = None,
+    host_capability_stream_invoker: HostCapabilityStreamInvoker | None = None,
+    data_dir: str | Path | None = None,
+) -> LoadedPlugin:
+    root = Path(plugin_root).resolve()
+    metadata = load_metadata(root)
+    if not SpecifierSet(metadata.runtime.sdk_version).contains(
+        Version(__version__),
+        prereleases=True,
+    ):
+        raise InvalidPluginDefinition(
+            f"astrbot-sdk {__version__} does not satisfy {metadata.runtime.sdk_version}"
+        )
+
+    grants = _filter_grants(
+        metadata,
+        granted_capabilities or CapabilitySet(),
+    )
+    plugin_data_dir = (
+        Path(data_dir)
+        if data_dir is not None
+        else _default_data_dir(
+            metadata,
+        )
+    )
+    plugin_data_dir.mkdir(parents=True, exist_ok=True)
+    context = PluginContext(
+        plugin=PluginInfo(
+            id=metadata.plugin_id,
+            name=metadata.name,
+            version=metadata.version,
+            runtime_mode=runtime_mode,
+        ),
+        config=config,
+        logger=logger or logging.getLogger(f"astrbot.plugin.{metadata.name}"),
+        capabilities=grants,
+        data_dir=plugin_data_dir,
+        _host_capability_invoker=host_capability_invoker,
+        _host_capability_stream_invoker=host_capability_stream_invoker,
+    )
+
+    plugin_class = _resolve_entrypoint(metadata, root)
+    try:
+        instance = plugin_class(context)
+    except TypeError as exc:
+        raise InvalidPluginDefinition(
+            f"{metadata.runtime.entrypoint!r} must accept only PluginContext"
+        ) from exc
+
+    registrations = discover_handlers(instance)
+    enabled: list[HandlerRegistration] = []
+    for registration in registrations:
+        capability_id = registration.spec.required_capability
+        if capability_id is None:
+            enabled.append(registration)
+            continue
+        if capability_id not in metadata.capabilities.all_ids:
+            raise InvalidPluginDefinition(
+                f"handler {registration.id!r} requires undeclared capability "
+                f"{capability_id!r}"
+            )
+        if grants.has(capability_id):
+            enabled.append(registration)
+
+    return LoadedPlugin(
+        metadata=metadata,
+        instance=instance,
+        registrations=tuple(enabled),
+    )
