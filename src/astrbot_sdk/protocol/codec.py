@@ -66,7 +66,11 @@ def _coerce_value(annotation: Any, raw: Any) -> Any:
     ):
         # Nested registered dataclass, e.g. AssetRef inside an Any-typed field.
         return _decode_dataclass(_PROTOCOL_DATACLASSES[raw["$type"]], raw["value"])
-    if isinstance(raw, dict) and set(raw) == {"$type", "value"} and raw["$type"] == "bytes":
+    if (
+        isinstance(raw, dict)
+        and set(raw) == {"$type", "value"}
+        and raw["$type"] == "bytes"
+    ):
         import base64
 
         return base64.b64decode(str(raw["value"]).encode("ascii"))

@@ -61,6 +61,19 @@
 
 ## 已决策的后续功能
 
+- [x] **web.route（HTTP over RPC，已完成）**：`ctx.web.route` 注册的路由
+  经 bridge 挂进 dashboard `registered_web_apis`，请求消毒（剥
+  Cookie/Authorization）后回放为 WebRequestInfo，响应为
+  WebResponseInfo + 逐 chunk ack 的背压流（SSE/大文件无特例）；
+  大请求体经 read_body 反向拉取。旧版 `register_web_api` 在 Runner 内
+  以真实 Quart test_request_context 回放（palworld 的
+  `quart.g.username`/`jsonify`/`request.args` 全保真），starlette 的
+  FileResponse/StreamingResponse 亦支持。palworld 验收通过
+  （33/33）。多值 query、multipart 表单、UploadFile 走
+  `astrbot.api.web` facade。
+- [ ] **views over RPC（下一步）**：`views.manifest` + `views.read`
+  纯代理（无缓存 v1），PluginPageService 读路径换 RPC；
+  `views`/`pages` 元数据透传 StarMetadata；缓存作为后续优化。
 - [x] **旧版兼容层 P2**（已完成）：Provider 代理（`astrbot.api.provider`、
   `get_using_provider`/`text_chat`/`llm_generate`/`tool_loop_agent`）、
   hooks 兼容（`on_llm_request` 等 14 个装饰器，旧签名原地改写经追踪

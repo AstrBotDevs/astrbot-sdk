@@ -141,7 +141,7 @@ def install() -> None:
     if _installed:
         return
 
-    from . import components, event, html, loader, po, provider, star, tools
+    from . import components, event, html, loader, po, provider, star, tools, web
 
     astrbot_mod = ModuleType("astrbot")
     astrbot_mod.__path__ = []
@@ -476,6 +476,23 @@ def install() -> None:
     message_mod.MessageEventResult = components.MessageEventResult
     message_mod.MessageChain = components.MessageChain
 
+    web_mod = ModuleType("astrbot.api.web")
+    web_mod.request = web.ApiWebRequestProxy()
+    web_mod.PluginMultiDict = web.PluginMultiDict
+    web_mod.PluginUploadFile = web.PluginUploadFile
+    try:
+        from starlette.responses import (
+            FileResponse,
+            JSONResponse,
+            StreamingResponse,
+        )
+
+        web_mod.FileResponse = FileResponse
+        web_mod.JSONResponse = JSONResponse
+        web_mod.StreamingResponse = StreamingResponse
+    except ImportError:
+        pass
+
     all_mod = ModuleType("astrbot.api.all")
     all_mod.AstrBotConfig = dict
     all_mod.logger = astrbot_mod.logger
@@ -546,6 +563,7 @@ def install() -> None:
     sys.modules["astrbot.api.message_components"] = components_mod
     sys.modules["astrbot.api.message"] = message_mod
     sys.modules["astrbot.api.all"] = all_mod
+    sys.modules["astrbot.api.web"] = web_mod
 
     # Type-only astrbot.core submodules are safe to expose; everything else
     # under astrbot.core stays blocked (live Host internals).

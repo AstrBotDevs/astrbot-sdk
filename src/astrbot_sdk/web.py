@@ -190,7 +190,9 @@ class WebResponse:
         return cls(text, status=status, content_type="text/plain; charset=utf-8")
 
 
-async def normalize_web_result(result: Any) -> tuple[WebResponseInfo, AsyncIterator[bytes]]:
+async def normalize_web_result(
+    result: Any,
+) -> tuple[WebResponseInfo, AsyncIterator[bytes]]:
     """Normalize one handler result into response info plus a chunk stream."""
     if isinstance(result, WebResponse):
         info = WebResponseInfo(status=result.status, headers=result.headers)
@@ -234,6 +236,7 @@ async def normalize_web_result(result: Any) -> tuple[WebResponseInfo, AsyncItera
 
         return info, streaming()
     if result is None:
+
         async def no_content() -> AsyncIterator[bytes]:
             return
             yield b""

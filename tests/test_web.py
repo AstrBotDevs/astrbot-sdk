@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from astrbot_sdk.capabilities import CapabilitySet
 from astrbot_sdk.runtime import StdioPluginClient
 from astrbot_sdk.web import WebRequestInfo
-
 from tests.test_stdio_transport import write_plugin
 
 PLUGIN = """

@@ -149,6 +149,28 @@ class CompatLoadedPlugin:
             )
         return await registration.handler(call, **dict(args))
 
+    async def invoke_web(self, request: Any) -> AsyncIterator[dict]:
+        """Invoke one legacy register_web_api handler."""
+        from ...errors import InvalidRequest, NotFound
+        from .web import invoke_web_route
+
+        entry = next(
+            (
+                item
+                for item in self.instance.context._web_routes
+                if item.route == request.route
+            ),
+            None,
+        )
+        if entry is None:
+            raise NotFound(f"web route not found: {request.route}")
+        if request.method.upper() not in entry.methods:
+            raise InvalidRequest(
+                f"method {request.method} not allowed for {request.route}"
+            )
+        async for item in invoke_web_route(self.instance, entry, request):
+            yield item
+
 
 def _load_legacy_metadata(plugin_root: Path) -> LegacyMetadata:
     metadata_path = plugin_root / "metadata.yaml"

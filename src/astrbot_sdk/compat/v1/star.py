@@ -53,6 +53,7 @@ class Context:
         self._pending: list[asyncio.Task] = []
         self._tasks: list[asyncio.Task] = []
         self._stars_cache: list | None = None
+        self._web_routes: list = []
         self.logger = ctx.logger
         from .conversation import ConversationManager
 
@@ -344,11 +345,39 @@ class Context:
             "deactivate_llm_tool is unavailable in isolated legacy mode"
         )
 
-    def register_web_api(self, *args: Any, **kwargs: Any) -> None:
-        """Register a dashboard web route (unsupported when isolated)."""
-        raise IsolationUnsupportedError(
-            "register_web_api is unavailable in isolated legacy mode; "
-            "web routes are not part of the capability model yet"
+    def register_web_api(
+        self,
+        route: str,
+        view_handler: Any,
+        methods: list[str],
+        desc: str,
+    ) -> None:
+        """Register one dashboard web route (legacy signature).
+
+        Registration is an RPC under the hood; the task is tracked and
+        awaited before plugin startup completes, same as tool registration.
+        """
+        from .web import WebRouteEntry
+
+        entry = WebRouteEntry(route, methods, desc, view_handler)
+        self._web_routes = [
+            item
+            for item in self._web_routes
+            if not (item.route == route and item.methods == entry.methods)
+        ]
+        self._web_routes.append(entry)
+        self._pending.append(
+            asyncio.get_running_loop().create_task(
+                self._ctx._invoke_capability(
+                    "web.route",
+                    "register",
+                    {
+                        "route": route,
+                        "methods": [method.upper() for method in methods],
+                        "description": desc,
+                    },
+                ),
+            ),
         )
 
     async def _drain_pending(self) -> None:
