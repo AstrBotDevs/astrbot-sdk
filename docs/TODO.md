@@ -91,6 +91,14 @@
   真实 bridge 在 core venv 中显著更好；根治靠 P0 per-plugin venv）。
   已知未做：`should_call_llm`（需要 EventResult 加语义标记，
   属协议改动）、`persona_manager`（等 personas 能力）。
+- [x] **真实插件 bridge 级验收**（2026-10-05，32/33 通过）：33 个真实
+  插件端到端经 SDKPluginBridge 验证（命令/旧版位置参数/hook 改写/
+  工具注册与调用/配置注入/生命周期/per-plugin venv 含 playwright 与
+  rapidocr+opencv 重量级安装）。修复了验收发现的 6 个问题：legacy
+  grant 集缺 pipeline observe/modify、astrbot 自依赖过滤、工具签名
+  variadic 容忍、空 __tool_params__ 逃逸、declared-but-empty 参数
+  短路、重插件 initialize 超时（start_timeout=60s）。唯一未过：
+  palworld（register_web_api，设计排除）。
 - [ ] 旧版兼容层 P3（长尾，按需）：`persona_manager`（等 personas 能力）、
   `astrbot.api.web` 路由（等 web 能力设计）、`EmbeddingProvider` 等
   类型外观的剩余零散项、`star_handlers_registry` 等注册表内省
