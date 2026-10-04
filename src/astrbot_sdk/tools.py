@@ -220,11 +220,13 @@ class ToolService:
             InvalidPluginDefinition: The handler is invalid.
             CapabilityDenied: llm.tool.register was not granted.
         """
+        declared_params: tuple[ToolParam, ...] | None = None
         if isinstance(tool, Tool):
             instance = tool
             if not isinstance(instance.name, str) or not instance.name:
                 raise InvalidPluginDefinition("tool class must declare a name")
             handler = instance.call
+            declared_params = instance.params
             tool = ToolDefinition(
                 name=instance.name,
                 description=(
@@ -232,7 +234,7 @@ class ToolService:
                     or _description_of(instance.call)
                     or instance.name
                 ),
-                params=instance.params or (),
+                params=instance.params if instance.params is not None else (),
             )
         elif handler is None:
             if not callable(tool) or isinstance(tool, ToolDefinition):
@@ -246,8 +248,10 @@ class ToolService:
             )
         if not inspect.iscoroutinefunction(handler):
             raise InvalidPluginDefinition("dynamic tool handler must be async")
-        params = tool.params or tuple(
-            tool_params_schema(handler, handler_label=f"tool {tool.name!r}"),
+        params = (
+            tool.params
+            if declared_params is not None
+            else tuple(tool_params_schema(handler, handler_label=f"tool {tool.name!r}"))
         )
         definition = ToolDefinition(
             name=tool.name,

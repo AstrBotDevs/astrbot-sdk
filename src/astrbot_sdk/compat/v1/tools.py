@@ -88,7 +88,7 @@ class LegacyFunctionToolAdapter(Tool):
         self._legacy_tool = legacy_tool
         self._context = context
 
-    async def call(self, call: Any, **kwargs: Any) -> Any:
+    async def call(self, call, **kwargs: Any) -> Any:
         """Invoke the legacy call(context, **kwargs) with a facade wrapper."""
         event = None
         if getattr(call, "event", None) is not None:

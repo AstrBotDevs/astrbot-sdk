@@ -95,6 +95,7 @@ class StdioPluginClient:
         capability_handler: HostCapabilityHandler | None = None,
         legacy: bool = False,
         env: Mapping[str, str] | None = None,
+        start_timeout: float | None = None,
     ) -> None:
         """Initialize the Host-side stdio client.
 
@@ -106,10 +107,13 @@ class StdioPluginClient:
             capability_handler: Dispatcher for authorized Runner-to-Host calls.
             legacy: Load the plugin through the legacy compat layer.
             env: Extra environment variables merged over the parent env.
+            start_timeout: Timeout for the initialize handshake; defaults to
+                timeout. Heavy plugins may need a larger value.
         """
         self.plugin_root = plugin_root.resolve()
         self.legacy = legacy
         self._extra_env = dict(env or {})
+        self.start_timeout = start_timeout if start_timeout is not None else timeout
         self.python_executable = str(python_executable or sys.executable)
         self.timeout = timeout
         self.logger = logger or logging.getLogger("astrbot.plugin_runner")
@@ -472,7 +476,8 @@ class StdioPluginClient:
         peer = self._peer
         if peer is None:
             raise HostUnavailable("stdio plugin Runner is not running")
-        return await peer.request(method, params, timeout_seconds=self.timeout)
+        timeout = self.start_timeout if method == "initialize" else self.timeout
+        return await peer.request(method, params, timeout_seconds=timeout)
 
     async def _handle_runner_request(self, frame: RequestFrame) -> Any:
         """Authorize and dispatch one Runner-to-Host capability call.
