@@ -119,6 +119,26 @@ def test_invalid_capability_id_is_rejected() -> None:
         parse_metadata(data)
 
 
+def test_runtime_language_defaults_to_python() -> None:
+    metadata = parse_metadata(sdk_metadata())
+    assert metadata.runtime.language == "python"
+
+
+@pytest.mark.parametrize("language", ["python", "java", "go", "rust"])
+def test_runtime_language_declared_values_parse(language: str) -> None:
+    data = sdk_metadata()
+    data["runtime"]["language"] = language
+    metadata = parse_metadata(data)
+    assert metadata.runtime.language == language
+
+
+def test_runtime_language_rejects_unknown_value() -> None:
+    data = sdk_metadata()
+    data["runtime"]["language"] = "node"
+    with pytest.raises(InvalidPluginMetadata, match="runtime.language"):
+        parse_metadata(data)
+
+
 def test_load_metadata_accepts_metadata_yml(tmp_path: Path) -> None:
     (tmp_path / "metadata.yml").write_text(
         yaml.safe_dump(sdk_metadata()),

@@ -28,6 +28,20 @@ class PluginAPIFamily(StrEnum):
     SDK = "sdk"
 
 
+class PluginLanguage(StrEnum):
+    """Implementation language of the plugin runner.
+
+    Only Python runners exist today; the remaining values are declared in
+    the contract so metadata written for future SDKs parses cleanly, and
+    the launcher rejects them with a clear error at start time.
+    """
+
+    PYTHON = "python"
+    JAVA = "java"
+    GO = "go"
+    RUST = "rust"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeMetadata:
     api: PluginAPIFamily
@@ -35,6 +49,7 @@ class RuntimeMetadata:
     module: str
     plugin_class: str
     sdk_version: str
+    language: PluginLanguage = PluginLanguage.PYTHON
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,11 +187,22 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
     if not isinstance(runtime, Mapping):
         raise InvalidPluginMetadata("runtime must be a mapping")
 
-    unknown = set(runtime) - {"api", "entrypoint", "sdk_version"}
+    unknown = set(runtime) - {"api", "entrypoint", "sdk_version", "language"}
     if unknown:
         raise InvalidPluginMetadata(
             f"unknown runtime fields: {', '.join(sorted(map(str, unknown)))}"
         )
+
+    language = PluginLanguage.PYTHON
+    raw_language = runtime.get("language")
+    if raw_language is not None:
+        try:
+            language = PluginLanguage(str(raw_language))
+        except ValueError as exc:
+            supported = ", ".join(sorted(item.value for item in PluginLanguage))
+            raise InvalidPluginMetadata(
+                f"runtime.language must be one of: {supported}"
+            ) from exc
 
     entrypoint = _required_string(runtime, "entrypoint")
     if entrypoint.count(":") != 1:
@@ -201,6 +227,7 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
         module=module,
         plugin_class=plugin_class,
         sdk_version=sdk_version,
+        language=language,
     )
 
 

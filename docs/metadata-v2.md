@@ -71,8 +71,13 @@ v2 保留当前字段及语义：
 | `api` | 是 | 第一阶段固定为 `sdk` |
 | `entrypoint` | 是 | `<module>:<Plugin 子类>`，模块路径相对插件根目录 |
 | `sdk_version` | 是 | 插件兼容的 `astrbot-sdk` PEP 440 版本范围 |
+| `language` | 否 | 插件 Runner 的实现语言：`python`（默认）/ `java` / `go` / `rust` |
 
 例如 `main:GreetingPlugin` 表示导入 `main` 模块中的 `GreetingPlugin`。
+
+`language` 已进入契约以便后续多语言 SDK 横向扩展；当前仅 `python`
+有 Runner 实现，声明其他语言的插件在启动时被 Host 以明确错误拒绝，
+元数据本身仍可正常解析。
 
 运行模式和 transport 不写入插件元数据：
 
