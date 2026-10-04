@@ -4,9 +4,13 @@
 
 ## P0 — 发布阻断项
 
-- [ ] **子进程环境变量白名单**：`StdioPluginClient` 目前用 `os.environ.copy()`
-  启动 Runner，core 环境里的 LLM API key、数据库凭证对插件进程全部可见。
-  改为白名单传递（PATH、LANG、Python 运行时必需项 + 显式声明项）。
+- [x] **子进程环境变量白名单**（已完成）：`runtime/env.py` 的
+  `runner_env()` 统一构造 Runner 环境——只继承 PATH/HOME/locale/temp/
+  XDG/proxy/CA 覆盖，主动设 `PYTHONNOUSERSITE=1`，不传任何 PYTHON*
+  （PYTHONPATH 会污染插件 venv 解析）；LLM key、DB 凭证等 core
+  secret 全部隔离。显式项（`ASTRBOT_DATA_PATH`、
+  `ASTRBOT_SDK_DATA_DIR`）经 `_extra_env` 覆盖层传入；venv 安装
+  子进程复用同一张白名单。
 - [x] **per-plugin 依赖环境（venv）**：`sdk_bridge/venv.py` 已实现。
   插件在 pyproject.toml（`[project.dependencies]`，优先）或
   requirements.txt 声明依赖；bridge 启动时创建

@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import inspect
 import logging
-import os
 import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -45,6 +44,7 @@ from ..protocol import (
 from ..registration import HandlerKind
 from ..results import EventResult, Propagation
 from ..tools import ToolCallContext
+from .env import runner_env
 from .metadata import load_metadata
 from .peer import Peer
 
@@ -192,7 +192,7 @@ class StdioPluginClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, **self._extra_env},
+            env=runner_env(self._extra_env),
             limit=MAX_FRAME_BYTES + 1,
         )
         self._peer = Peer(
