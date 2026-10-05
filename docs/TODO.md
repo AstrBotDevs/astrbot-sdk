@@ -200,15 +200,24 @@
   PlatformStatus（6）、session_lock（14）、ContentPart（4）、
   stdout 污染协议帧（7 中 3 恢复——插件 print/pip 子进程写 fd 1，
   Runner 现在把 fd 1 重定向到 stderr、协议帧走 dup 后的私有 fd）。
-  剩余失败分桶（设计排除为主）：`astrbot.core` 直接导入 53、`Context.get_config()` 42、
-  `register_platform_adapter` 27、`config.save_config()` 18、
-  `activate_llm_tool`/`get_llm_tool_manager` 13、`pipeline` 8、
-  `persona_manager` 5（等 personas 能力）、`star.config` 4、
-  `MediaResolver`/`compress_image`/`convert_audio` 4+（候选：
-  并入 assets 能力）、`extract_quoted_message_images`（需平台适配器
-  访问，host 能力候选）。其余为插件自身问题：未声明三方依赖、
-  缺字体/数据文件、zbar 原生库、导入期自安装依赖超握手超时、
-  UTF-16/BOM 配置文件。
+  二轮复扫（同日，1879 ok / 505 fail，78.8%）：platform.raw 落地后
+  `astrbot.core.platform.sources` 一桶基本消除；metadata.yaml 缺失
+  容忍 + 握手 ctx 解析修复又吃 20+。剩余失败分桶（设计排除为主）：
+  `astrbot.core` 直接导入 74+52+6、`Context.get_config()` 62、
+  `config.save_config()` 21、`register_platform_adapter` 19+9、
+  `activate_llm_tool`/`get_llm_tool_manager` 7+6、`persona_manager` 5
+  （等 personas 能力）、`pipeline` 9、`star.config`、
+  `MediaResolver`/`compress_image`/`convert_audio`/`RerankProvider`
+  （候选：并入 assets 能力）、`extract_quoted_message_images`
+  （需平台适配器访问，host 能力候选）、`get_db` 4。
+  插件自身问题：未声明/装不上三方依赖 17+4、`data.plugin*` 相对导入
+  16、缺字体/数据文件、zbar 原生库、UTF-16/BOM 配置文件、只读文件
+  系统假设。另有 4 个插件 initialize 期下载大型数据集超握手 60s
+  超时（maimaidx/rollpigs/bilibili_learning_bot/local_reminiscence，
+  进程内模式可加载但启动慢；TimeoutError 空消息问题已修复为可读
+  报错）。过程中修复：legacy handler 发现改用
+  `inspect.getattr_static`（插件类上的裸 assert property 不再
+  中断加载）。
 - [x] 旧版兼容层 platform.raw（已完成，仅 legacy）：133 个插件直接
   import `astrbot.core.platform.sources.*`（468 处 aiocqhttp）做两件事——
   isinstance 事件类判断、`event.bot.api.call_action` 原生 OneBot
