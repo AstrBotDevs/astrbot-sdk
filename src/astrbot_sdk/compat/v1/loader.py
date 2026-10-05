@@ -233,10 +233,15 @@ class CompatLoadedPlugin:
 
 
 def _load_legacy_metadata(plugin_root: Path) -> LegacyMetadata:
+    # Old plugins may ship without metadata.yaml; the register decorator or
+    # class attributes then carry the plugin info, like the in-process
+    # loader (name falls back to the directory name).
     metadata_path = plugin_root / "metadata.yaml"
-    if not metadata_path.is_file():
-        raise PluginImportError(f"metadata.yaml not found in {plugin_root}")
-    data = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+    data = (
+        yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+        if metadata_path.is_file()
+        else {}
+    ) or {}
     name = str(data.get("name") or plugin_root.name)
     author = str(data.get("author") or "unknown")
     raw_views = data.get("views") if isinstance(data.get("views"), list) else None

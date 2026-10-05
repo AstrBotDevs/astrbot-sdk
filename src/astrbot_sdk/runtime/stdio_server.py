@@ -501,6 +501,12 @@ class StdioPluginServer:
                     }
                 )
 
+            # Resolve the SDK context: legacy loaded plugins expose it as
+            # sdk_ctx (their Star instance may carry an unrelated own "ctx"
+            # attribute), new-style plugins as instance.ctx.
+            handshake_ctx = getattr(loaded, "sdk_ctx", None)
+            if handshake_ctx is None:
+                handshake_ctx = getattr(loaded.instance, "ctx", None)
             return {
                 "protocol_version": PROTOCOL_VERSION,
                 "plugin": {
@@ -516,20 +522,11 @@ class StdioPluginServer:
                         "methods": list(route.methods),
                         "description": route.description,
                     }
-                    for route in getattr(
-                        getattr(loaded.instance, "ctx", None),
-                        "web",
-                        None,
-                    ).routes
+                    for route in handshake_ctx.web.routes
                 ]
-                if getattr(getattr(loaded.instance, "ctx", None), "web", None)
-                is not None
+                if getattr(handshake_ctx, "web", None) is not None
                 else [],
-                "capabilities": list(
-                    getattr(loaded.instance, "ctx", None).capabilities
-                    if getattr(loaded.instance, "ctx", None) is not None
-                    else loaded.sdk_ctx.capabilities
-                ),
+                "capabilities": list(handshake_ctx.capabilities),
             }
         finally:
             self._initializing = False

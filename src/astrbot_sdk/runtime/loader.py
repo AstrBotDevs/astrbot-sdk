@@ -60,12 +60,15 @@ def _load_metadata_for_legacy(plugin_root: Path) -> PluginMetadata:
         RuntimeMetadata,
     )
 
+    metadata_file = plugin_root / "metadata.yaml"
+    # Old plugins may ship without metadata.yaml; the register decorator or
+    # class attributes then carry the plugin info (name falls back to the
+    # directory name), like the in-process loader.
     data = (
-        yaml.safe_load(
-            (plugin_root / "metadata.yaml").read_text(encoding="utf-8"),
-        )
-        or {}
-    )
+        yaml.safe_load(metadata_file.read_text(encoding="utf-8"))
+        if metadata_file.is_file()
+        else {}
+    ) or {}
     name = str(data.get("name") or plugin_root.name)
     author = str(data.get("author") or "unknown")
     raw_views = data.get("views") if isinstance(data.get("views"), list) else None
