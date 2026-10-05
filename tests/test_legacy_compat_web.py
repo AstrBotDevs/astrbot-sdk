@@ -22,7 +22,7 @@ from astrbot.api.star import Context, Star
 class LegacyWebPlugin(Star):
     async def initialize(self):
         self.context.register_web_api(
-            "/legacy/items/{item_id}", self.get_item, ["GET"], "get item")
+            "/legacy/items/<item_id>", self.get_item, ["GET"], "get item")
         self.context.register_web_api(
             "/legacy/echo", self.echo, ["POST"], "echo body")
         self.context.register_web_api(
@@ -110,7 +110,7 @@ async def test_legacy_web_routes(tmp_path: Path) -> None:
         )
         # register_web_api flushed during startup.
         assert {r["route"] for r in registrations} == {
-            "/legacy/items/{item_id}",
+            "/legacy/items/<item_id>",
             "/legacy/echo",
             "/legacy/whoami",
         }
@@ -121,7 +121,7 @@ async def test_legacy_web_routes(tmp_path: Path) -> None:
             item
             async for item in client.invoke_web(
                 make_request(
-                    "/legacy/items/{item_id}",
+                    "/legacy/items/<item_id>",
                     path="/legacy/items/abc",
                     path_params={"item_id": "abc"},
                     query=(("verbose", "yes"),),

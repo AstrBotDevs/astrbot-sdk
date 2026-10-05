@@ -87,29 +87,10 @@ async def _normalize_quart_result(
     if isinstance(result, dict | list):
         result = jsonify(result)
 
-    from starlette.responses import FileResponse
-    from starlette.responses import Response as StarletteResponse
+    from ...web import _looks_like_starlette_response, _normalize_starlette_like
 
-    if isinstance(result, StarletteResponse):
-        headers = {str(k).lower(): str(v) for k, v in result.headers.items()}
-        info = WebResponseInfo(status=result.status_code, headers=headers)
-        if isinstance(result, FileResponse):
-            path = result.path
-
-            async def file_chunks() -> AsyncIterator[bytes]:
-                import aiofiles
-
-                async with aiofiles.open(path, "rb") as file:
-                    while chunk := await file.read(1024 * 512):
-                        yield chunk
-
-            return info, file_chunks()
-
-        async def starlette_chunks() -> AsyncIterator[bytes]:
-            async for chunk in result.body_iterator:
-                yield chunk.encode() if isinstance(chunk, str) else bytes(chunk)
-
-        return info, starlette_chunks()
+    if _looks_like_starlette_response(result):
+        return await _normalize_starlette_like(result)
 
     if isinstance(result, QuartResponse):
         headers = {str(k).lower(): str(v) for k, v in result.headers.items()}

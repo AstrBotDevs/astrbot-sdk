@@ -5,16 +5,26 @@ incoming HTTP requests and replays them to the plugin as WebRequestInfo
 plus an optional body pull channel. Responses are a WebResponseInfo
 followed by a backpressure-controlled chunk stream, so streaming
 responses (SSE, large files) work without special cases.
+
+The contract is framework-neutral by design. Handlers may also return
+starlette response objects (Response/JSONResponse/StreamingResponse/
+FileResponse); they are recognized structurally, without the SDK
+importing starlette itself.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json as json_module
+import mimetypes
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from .errors import InvalidPluginDefinition
 from .protocol_registry import register_protocol_dataclass
 
 _WEB_CAPABILITY = "web.route"
@@ -168,12 +178,14 @@ class WebResponse:
         status: int = 200,
         headers: Mapping[str, str] | None = None,
         content_type: str | None = None,
+        _stream: Any = None,
     ) -> None:
         self.body = body.encode() if isinstance(body, str) else body
         self.status = status
         self.headers = dict(headers or {})
         if content_type is not None:
             self.headers.setdefault("content-type", content_type)
+        self._stream = _stream
 
     @classmethod
     def json(cls, data: Any, status: int = 200) -> WebResponse:
@@ -189,19 +201,179 @@ class WebResponse:
         """Build a plain-text response."""
         return cls(text, status=status, content_type="text/plain; charset=utf-8")
 
+    @classmethod
+    def redirect(cls, url: str, status: int = 302) -> WebResponse:
+        """Build a redirect response."""
+        return cls(b"", status=status, headers={"location": url})
+
+    def _with_headers(self, headers: Mapping[str, str] | None) -> WebResponse:
+        if headers:
+            merged = dict(self.headers)
+            merged.update(headers)
+            self.headers = merged
+        return self
+
+    def _normalize(self) -> tuple[WebResponseInfo, AsyncIterator[bytes]]:
+        """Convert to the wire shape: response info plus a chunk stream."""
+        info = WebResponseInfo(status=self.status, headers=self.headers)
+        if self._stream is not None:
+            stream = self._stream
+
+            async def chunks() -> AsyncIterator[bytes]:
+                async for chunk in stream:
+                    yield chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+
+            return info, chunks()
+
+        async def buffered() -> AsyncIterator[bytes]:
+            if self.body:
+                yield self.body
+
+        return info, buffered()
+
+
+def json_response(
+    data: Any = None,
+    *,
+    status_code: int = 200,
+    headers: Mapping[str, str] | None = None,
+) -> WebResponse:
+    """Build a JSON response (mirrors astrbot.api.web.json_response)."""
+    return WebResponse.json(
+        {} if data is None else data,
+        status=status_code,
+    )._with_headers(headers)
+
+
+def error_response(
+    message: str,
+    *,
+    status_code: int = 400,
+    data: Any = None,
+    headers: Mapping[str, str] | None = None,
+) -> WebResponse:
+    """Build a standard error envelope (mirrors api.web.error_response)."""
+    return json_response(
+        {"status": "error", "message": message, "data": data},
+        status_code=status_code,
+        headers=headers,
+    )
+
+
+def file_response(
+    path: str | Path,
+    *,
+    filename: str | None = None,
+    content_type: str | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> WebResponse:
+    """Build a file download response, streamed in chunks."""
+    file_path = Path(path)
+    media_type = (
+        content_type
+        or mimetypes.guess_type(str(filename or file_path.name))[0]
+        or "application/octet-stream"
+    )
+    response_headers: dict[str, str] = dict(headers or {})
+    if filename is not None:
+        response_headers.setdefault(
+            "content-disposition",
+            f'attachment; filename="{filename}"',
+        )
+
+    async def chunks() -> AsyncIterator[bytes]:
+        file = await asyncio.to_thread(file_path.open, "rb")
+        try:
+            while chunk := await asyncio.to_thread(file.read, 512 * 1024):
+                yield chunk
+        finally:
+            await asyncio.to_thread(file.close)
+
+    return WebResponse(
+        status=200,
+        headers=response_headers,
+        content_type=media_type,
+        _stream=chunks(),
+    )
+
+
+def stream_response(
+    content: Any,
+    *,
+    content_type: str = "text/event-stream",
+    status_code: int = 200,
+    headers: Mapping[str, str] | None = None,
+) -> WebResponse:
+    """Build a streaming response from a sync or async iterable."""
+    if hasattr(content, "__aiter__"):
+        stream = content
+    else:
+
+        async def iterate() -> AsyncIterator[Any]:
+            for item in content:
+                yield item
+
+        stream = iterate()
+    return WebResponse(
+        status=status_code,
+        headers=headers,
+        content_type=content_type,
+        _stream=stream,
+    )
+
+
+def _looks_like_starlette_response(result: Any) -> bool:
+    """Duck-typed starlette Response check (no starlette import)."""
+    return (
+        hasattr(result, "status_code")
+        and hasattr(result, "headers")
+        and (
+            hasattr(result, "body")
+            or hasattr(result, "body_iterator")
+            or hasattr(result, "path")
+        )
+    )
+
+
+async def _normalize_starlette_like(
+    result: Any,
+) -> tuple[WebResponseInfo, AsyncIterator[bytes]]:
+    """Normalize a starlette-shaped response without importing starlette."""
+    headers = {str(k).lower(): str(v) for k, v in result.headers.items()}
+    info = WebResponseInfo(status=int(result.status_code), headers=headers)
+
+    path = getattr(result, "path", None)
+    if path is not None:
+        return file_response(path)._normalize()
+
+    body_iterator = getattr(result, "body_iterator", None)
+    if body_iterator is not None:
+
+        async def streaming() -> AsyncIterator[bytes]:
+            async for chunk in body_iterator:
+                yield chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+
+        return info, streaming()
+
+    body = result.body
+    if isinstance(body, str):
+        body = body.encode()
+
+    async def buffered() -> AsyncIterator[bytes]:
+        if body:
+            yield bytes(body)
+
+    return info, buffered()
+
 
 async def normalize_web_result(
     result: Any,
 ) -> tuple[WebResponseInfo, AsyncIterator[bytes]]:
     """Normalize one handler result into response info plus a chunk stream."""
     if isinstance(result, WebResponse):
-        info = WebResponseInfo(status=result.status, headers=result.headers)
-
-        async def buffered() -> AsyncIterator[bytes]:
-            if result.body:
-                yield result.body
-
-        return info, buffered()
+        return result._normalize()
+    if _looks_like_starlette_response(result):
+        return await _normalize_starlette_like(result)
     if isinstance(result, dict | list):
         return await normalize_web_result(WebResponse.json(result))
     if isinstance(result, str | bytes):
@@ -248,9 +420,25 @@ async def normalize_web_result(
 class WebService:
     """Register plugin web routes (``ctx.web``)."""
 
+    _ROUTE_PARAM_RE = re.compile(r"<(?:(path):)?([A-Za-z_][A-Za-z0-9_]*)>")
+
     def __init__(self, ctx: Any) -> None:
         self._ctx = ctx
         self.routes: list[WebRouteRegistration] = []
+
+    def _validate_route(self, path: str) -> None:
+        """Validate the `<name>` / `<path:name>` route pattern syntax."""
+        for match in self._ROUTE_PARAM_RE.finditer(path):
+            if match.group(1) == "path" and match.end() != len(path):
+                raise InvalidPluginDefinition(
+                    f"<path:...> parameter must be the last segment: {path}"
+                )
+        stripped = self._ROUTE_PARAM_RE.sub("", path)
+        if any(char in stripped for char in "<>{}"):
+            raise InvalidPluginDefinition(
+                f"malformed route parameter in {path!r}; "
+                "use <name> or <path:name> segments"
+            )
 
     def route(
         self,
@@ -258,9 +446,14 @@ class WebService:
         methods: tuple[str, ...] | list[str] = ("GET",),
         description: str = "",
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register one HTTP route served through the pipeline."""
+        """Register one HTTP route served through the pipeline.
+
+        Paths use the dashboard route syntax: `<name>` matches one path
+        segment and `<path:name>` matches the remaining multi-segment path.
+        """
         if not path.startswith("/"):
             raise ValueError("web route paths must start with '/'")
+        self._validate_route(path)
 
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             self.routes.append(
