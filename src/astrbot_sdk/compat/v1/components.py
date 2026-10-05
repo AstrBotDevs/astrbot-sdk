@@ -326,6 +326,10 @@ class Image:
         return Image(file=str(path), path=str(path), **kwargs)
 
     @staticmethod
+    def fromBase64(base64_str: str, **kwargs: Any) -> Image:
+        return Image(file=f"base64://{base64_str}", **kwargs)
+
+    @staticmethod
     def fromBytes(data: bytes, **kwargs: Any) -> Image:
         return Image(file=data, **kwargs)
 
@@ -443,18 +447,116 @@ class Share:
         self.image = image
 
 
+class EventResultType(enum.Enum):
+    """Legacy event result type (propagation decision)."""
+
+    CONTINUE = enum.auto()
+    STOP = enum.auto()
+
+
+class ResultContentType(enum.Enum):
+    """Legacy result content type."""
+
+    LLM_RESULT = enum.auto()
+    AGENT_RUNNER_ERROR = enum.auto()
+    GENERAL_RESULT = enum.auto()
+    STREAMING_RESULT = enum.auto()
+    STREAMING_FINISH = enum.auto()
+
+
 class MessageChain:
     """Legacy mutable message chain."""
 
-    def __init__(self, chain: list | None = None, **_: Any) -> None:
+    def __init__(
+        self,
+        chain: list | None = None,
+        use_t2i_: bool | None = None,
+        use_markdown_: bool | None = None,
+        type: str | None = None,
+        **_: Any,
+    ) -> None:
         self.chain: list = list(chain or [])
+        self.use_t2i_ = use_t2i_
+        self.use_markdown_ = use_markdown_
+        self.type = type
 
-    def message(self, text: str) -> MessageChain:
-        self.chain.append(Plain(text))
+    def derive(self, chain: list | None = None) -> MessageChain:
+        """Create a new chain inheriting this chain's metadata flags."""
+        return MessageChain(
+            chain=chain if chain is not None else [],
+            use_t2i_=self.use_t2i_,
+            use_markdown_=self.use_markdown_,
+            type=self.type,
+        )
+
+    def message(self, message: str) -> MessageChain:
+        self.chain.append(Plain(message))
         return self
 
-    def get_plain_text(self) -> str:
-        return "".join(c.text for c in self.chain if isinstance(c, Plain))
+    def at(self, name: str, qq: Any) -> MessageChain:
+        self.chain.append(At(name=name, qq=qq))
+        return self
+
+    def at_all(self) -> MessageChain:
+        self.chain.append(AtAll())
+        return self
+
+    def error(self, message: str) -> MessageChain:
+        # Deprecated in the in-process core; kept as an alias of message().
+        return self.message(message)
+
+    def url_image(self, url: str) -> MessageChain:
+        self.chain.append(Image.fromURL(url))
+        return self
+
+    def file_image(self, path: Any) -> MessageChain:
+        self.chain.append(Image.fromFileSystem(path))
+        return self
+
+    def base64_image(self, base64_str: str) -> MessageChain:
+        self.chain.append(Image.fromBase64(base64_str))
+        return self
+
+    def use_t2i(self, use_t2i: bool) -> MessageChain:
+        self.use_t2i_ = use_t2i
+        return self
+
+    def use_markdown(self, use: bool | None = True) -> MessageChain:
+        self.use_markdown_ = use
+        return self
+
+    def get_plain_text(self, with_other_comps_mark: bool = False) -> str:
+        if not with_other_comps_mark:
+            return " ".join(c.text for c in self.chain if isinstance(c, Plain))
+        texts = []
+        for comp in self.chain:
+            if isinstance(comp, Plain):
+                texts.append(comp.text)
+            elif isinstance(comp, Json):
+                texts.append(f"{comp.data}")
+            else:
+                texts.append(f"[{comp.__class__.__name__}]")
+        return " ".join(texts)
+
+    def squash_plain(self) -> MessageChain | None:
+        """Merge all Plain segments into the first one, preserving order."""
+        if not self.chain:
+            return None
+        new_chain = []
+        first_plain = None
+        plain_texts = []
+        for comp in self.chain:
+            if isinstance(comp, Plain):
+                if first_plain is None:
+                    first_plain = comp
+                    new_chain.append(comp)
+                plain_texts.append(comp.text)
+            else:
+                new_chain.append(comp)
+        if first_plain is not None:
+            first_plain.text = "".join(plain_texts)
+        self.chain = new_chain
+        return self
 
     def to_sdk(self) -> SDKMessageChain:
         """Convert to the new immutable chain."""
@@ -466,40 +568,52 @@ class MessageChain:
         return MessageChain(chain=[from_sdk_segment(s) for s in chain])
 
 
-class MessageEventResult:
-    """Legacy message event result."""
+class MessageEventResult(MessageChain):
+    """Legacy message event result: a chain plus the propagation decision."""
 
     def __init__(self) -> None:
-        self.chain: list = []
-        self._stopped = False
-
-    def message(self, text: str) -> MessageEventResult:
-        self.chain = [Plain(text)]
-        return self
+        super().__init__()
+        self.result_type = EventResultType.CONTINUE
+        self.result_content_type = ResultContentType.GENERAL_RESULT
+        self.async_stream: Any = None
 
     def set_chain(self, chain: MessageChain | list) -> MessageEventResult:
         self.chain = list(chain.chain if isinstance(chain, MessageChain) else chain)
         return self
 
     def stop_event(self) -> MessageEventResult:
-        self._stopped = True
+        self.result_type = EventResultType.STOP
         return self
 
     def continue_event(self) -> MessageEventResult:
-        self._stopped = False
+        self.result_type = EventResultType.CONTINUE
         return self
 
     def is_stopped(self) -> bool:
-        return self._stopped
+        return self.result_type == EventResultType.STOP
 
-    def get_plain_text(self) -> str:
-        return "".join(c.text for c in self.chain if isinstance(c, Plain))
+    def set_result_content_type(self, typ: ResultContentType) -> MessageEventResult:
+        self.result_content_type = typ
+        return self
+
+    def set_async_stream(self, stream: Any) -> MessageEventResult:
+        self.async_stream = stream
+        return self
+
+    def is_llm_result(self) -> bool:
+        return self.result_content_type == ResultContentType.LLM_RESULT
+
+    def is_model_result(self) -> bool:
+        return self.result_content_type in (
+            ResultContentType.LLM_RESULT,
+            ResultContentType.AGENT_RUNNER_ERROR,
+        )
 
     def to_sdk_result(self) -> SDKMessageResult | None:
         """Convert to the new result; None when empty and not stopped."""
-        propagation = Propagation.STOP if self._stopped else Propagation.CONTINUE
+        propagation = Propagation.STOP if self.is_stopped() else Propagation.CONTINUE
         if not self.chain:
-            if self._stopped:
+            if self.is_stopped():
                 from ...results import EventResult
 
                 return EventResult(propagation=propagation)

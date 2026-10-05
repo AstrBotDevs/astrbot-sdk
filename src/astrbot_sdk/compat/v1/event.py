@@ -8,10 +8,12 @@ from typing import Any
 from ...events import MessageEvent, SenderRole
 from ...results import Propagation
 from .components import (
+    EventResultType,
     Image,
     MessageChain,
     MessageEventResult,
     Plain,
+    ResultContentType,
     from_sdk_segment,
 )
 
@@ -162,21 +164,6 @@ PLATFORM_ADAPTER_NAMES = {
     PlatformAdapterType.MATTERMOST: "mattermost",
     PlatformAdapterType.WEBCHAT: "webchat",
 }
-
-
-class EventResultType(enum.Enum):
-    """Legacy event result type."""
-
-    CONTINUE = enum.auto()
-    STOP = enum.auto()
-
-
-class ResultContentType(enum.Enum):
-    """Legacy result content type."""
-
-    LLM_RESULT = enum.auto()
-    AGENT_RUNNER_ERROR = enum.auto()
-    GENERAL_RESULT = enum.auto()
 
 
 class MessageType(enum.Enum):

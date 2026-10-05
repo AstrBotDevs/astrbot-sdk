@@ -201,6 +201,92 @@ class OddEventNamePlugin(Star):
 
 
 @pytest.mark.asyncio
+async def test_legacy_command_result_builders(tmp_path: Path) -> None:
+    # CommandResult supports the full in-process builder surface: message
+    # appends, error() is a deprecated alias, file_image sends a local file
+    # through the asset upload pipeline.
+    from astrbot_sdk.assets import AssetRef
+    from astrbot_sdk.message_components import Image as SDKImage
+
+    plugin_root = tmp_path / "legacy_builders"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy_builders",
+                "desc": "builder test",
+                "author": "AstrBot",
+                "version": "1.0.0",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "pic.jpg").write_bytes(b"\xff\xd8fake-jpeg")
+    (plugin_root / "main.py").write_text(
+        f"""
+from astrbot.api.all import AstrMessageEvent, CommandResult
+from astrbot.api.event import filter
+from astrbot.api.star import Context, Star
+
+
+class BuilderPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    @filter.command("moe")
+    async def moe(self, message: AstrMessageEvent):
+        yield CommandResult().file_image(r"{plugin_root / "pic.jpg"}")
+
+    @filter.command("combo")
+    async def combo(self, event: AstrMessageEvent):
+        result = CommandResult().message("a").error("b")
+        yield event.plain_result(result.get_plain_text())
+""",
+        encoding="utf-8",
+    )
+
+    uploads: list[dict[str, Any]] = []
+
+    async def host_handler(grant, operation, payload):
+        cid = grant if isinstance(grant, str) else grant.id
+        if cid == "assets.transfer" and operation == "upload":
+            uploads.append(payload)
+            return {"asset": AssetRef(id="ast_host_1", size=8)}
+        raise AssertionError(f"unexpected call: {cid} {operation}")
+
+    client = StdioPluginClient(
+        plugin_root,
+        python_executable=Path(sys.executable),
+        capability_handler=host_handler,
+        legacy=True,
+    )
+    try:
+        await client.start(
+            granted_capabilities=CapabilitySet.from_ids(
+                "storage.kv",
+                "assets.transfer",
+            ),
+        )
+
+        results = [r async for r in client.invoke("moe", make_event("moe"))]
+        images = [
+            segment
+            for r in results
+            if r is not None
+            for segment in r.message
+            if isinstance(segment, SDKImage)
+        ]
+        assert len(images) == 1
+        assert getattr(images[0].source, "id", None) == "ast_host_1"
+        assert len(uploads) == 1
+
+        results = [r async for r in client.invoke("combo", make_event("combo"))]
+        assert [r.message.text for r in results if r is not None] == ["a b"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_legacy_plugin_runs_unmodified(tmp_path: Path) -> None:
     plugin_root = tmp_path / "legacy_hello"
     write_legacy_plugin(plugin_root)
