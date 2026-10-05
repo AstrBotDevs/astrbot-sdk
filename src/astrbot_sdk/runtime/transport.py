@@ -174,11 +174,16 @@ class WebSocketTransport:
         self._closed.set()
 
     async def wait_closed(self) -> None:
-        # Reads and writes set the event on closure; the receive loop of the
-        # owning peer always observes the close, so no recv() happens here
+        # websockets completes the closing handshake in the background, so
+        # this resolves even when no read loop is consuming the socket
         # (a second recv consumer would race the read loop).
-        await self._closed.wait()
+        await self._connection.wait_closed()
+        self._closed.set()
 
     @property
     def closed(self) -> bool:
-        return self._closed.is_set()
+        if self._closed.is_set():
+            return True
+        from websockets.protocol import State
+
+        return self._connection.state is State.CLOSED
