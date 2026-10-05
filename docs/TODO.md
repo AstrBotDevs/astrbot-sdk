@@ -61,19 +61,38 @@
 
 ## 已决策的后续功能
 
-- [ ] **session 等待能力（session_waiter，设计已定，待实现）**：
-  语料中 57 个插件使用（多轮问答/向导是真实需求）。core 机制 =
-  全局 session 注册表 + builtin Main 的 maxsize 优先级 ALL 事件
-  拦截（匹配则 trigger + stop_event）+ plugin 进程内 future。
-  隔离模式设计：注册表与拦截在 Host（bridge 侧建镜像表，匹配事件
-  改推 `session.matched` RPC 通知并 stop_event），future 与多轮
-  状态留在 plugin 进程；`controller.keep(t)` = 交付后重新武装一次
-  性等待，`stop()` = 注销；超时放 Host 侧（插件崩溃不泄漏会话）。
-  自定义 SessionFilter 语料中很常见（10+ 种，多为 umo+sender/group
-  的字段组合），契约改为声明式字段键（plugin 声明 key 由哪些事件
-  字段组成，Host 对入站事件计算同键匹配），纯代码 filter v1 响报。
-  同一 session_id 冲突先到先得并响报。legacy 的
-  `@session_waiter` 装饰器在 Runner 内用该能力完整复刻。
+- [ ] **session 等待能力（session_waiter，设计已定稿 v2，待实现）**：
+  语料 57 个插件使用（多轮问答/向导是真实需求）。core 机制 =
+  全局 session 注册表 + maxsize 优先级 ALL 事件拦截（匹配则
+  trigger + stop_event）+ plugin 进程内 future。隔离模式定稿：
+
+  - 插件面 API 为线性等待：`async with ctx.sessions.wait(umo,
+    filter, timeout=60) as s` + `await s.next(timeout=...)`（逐轮
+    可覆盖默认超时）+ `s.ask(...)` 便捷发送。旧版的
+    keep/stop/history_chains 概念分别消解为"再调一次 next"、
+    "退出 async with"、"插件本地持有已收到的 event"。
+  - `SessionFilter` 保持代码形态并在 Runner 侧求值：旧 API 形状
+    全保留，语料 10+ 种自定义纯代码 filter 全部兼容（先前"声明式
+    字段键、纯代码响报"方案废弃）。Host 只按 umo 做候选
+    narrowing，匹配判定与拦截执行分离。
+  - capability 定为 `message.wait`（op=register/rearm/stop），与
+    `message.send`（发）/`message.receive`（看）并列第三动词
+    "等"（认领+拦截）；拦截吞消息是 receive 之外的增量授权。
+    legacy 插件进 `_LEGACY_GRANT_IDS`。
+  - RPC：plugin→Host 走 `message.wait`(op)；Host→plugin 通知为
+    `message.wait.consider/matched/timeout`。注册时插件用 filter
+    对发起事件算出 key 上报，Host 建镜像注册表；入站事件 umo
+    命中时扇出 consider，Runner 回算各 waiter 的 key，Host 比对
+    认领（跨插件撞键先到先得并响报）后 stop_event 并 matched
+    投递。consider 带 1s RPC 超时，未答按未匹配放行并告警。
+  - 计时在 Host 侧：投递 matched 时武装、rearm 重置、超时推
+    `message.wait.timeout`（插件 next() 收 TimeoutError）；插件
+    崩溃/断线由 supervisor 立即清理其全部 waiter，不泄漏会话。
+    用户在插件处理间隙发消息由 Runner 本地排队，next() 立取。
+  - 与进程内 USER_SESSIONS 机制共存：两套拦截各自生效，已被
+    一方吞掉的事件另一方不可见。
+  - legacy 的 `@session_waiter` 装饰器在 Runner 内用该能力完整
+    复刻（含 keep/stop/get_history_chains 语义）。
 - [ ] **utils.io 工具 shim（按需）**：语料 28 个插件导入
   `astrbot.core.utils.io`（多为 `download_image_by_url`/
   `save_temp_img` 等不碰 host 状态的纯工具），可在 compat 层给
