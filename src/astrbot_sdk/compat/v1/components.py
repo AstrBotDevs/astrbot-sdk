@@ -73,6 +73,11 @@ def _media_source(url: Any, file: Any) -> Any:
         A URL string, ``Path``, or bytes suitable as a media segment source.
     """
     source = url or file
+    # AssetRef (render/speech capability results) passes straight through.
+    from ...assets import AssetRef
+
+    if isinstance(source, AssetRef):
+        return source
     if isinstance(source, str):
         if source.startswith("base64://"):
             return base64.b64decode(source[len("base64://") :])
@@ -141,6 +146,21 @@ def to_sdk_segment(component: Any) -> MessageSegment:
                 "content": component.content or "",
                 "image": component.image or "",
             },
+        )
+    if isinstance(component, Location):
+        return SDKUnknownSegment(
+            segment_type="Location",
+            data={
+                "lat": component.lat,
+                "lon": component.lon,
+                "title": component.title or "",
+                "content": component.content or "",
+            },
+        )
+    if isinstance(component, Unknown):
+        return SDKUnknownSegment(
+            segment_type="Unknown",
+            data={"text": component.text},
         )
     raise TypeError(f"unsupported message component: {type(component)!r}")
 
@@ -323,6 +343,10 @@ class Image:
 
     @staticmethod
     def fromFileSystem(path: Any, **kwargs: Any) -> Image:
+        from ...assets import AssetRef
+
+        if isinstance(path, AssetRef):
+            return Image(file=path, **kwargs)
         return Image(file=str(path), path=str(path), **kwargs)
 
     @staticmethod
@@ -445,6 +469,30 @@ class Share:
         self.title = title
         self.content = content
         self.image = image
+
+
+class Location:
+    """Legacy location component (coordinates plus optional labels)."""
+
+    def __init__(
+        self,
+        lat: float = 0.0,
+        lon: float = 0.0,
+        title: str = "",
+        content: str = "",
+        **_: Any,
+    ) -> None:
+        self.lat = lat
+        self.lon = lon
+        self.title = title
+        self.content = content
+
+
+class Unknown:
+    """Legacy unknown component preserving the raw text payload."""
+
+    def __init__(self, text: str = "", **_: Any) -> None:
+        self.text = text
 
 
 class EventResultType(enum.Enum):
@@ -622,3 +670,25 @@ class MessageEventResult(MessageChain):
             propagation=propagation,
             message=MessageChain(chain=self.chain).to_sdk(),
         )
+
+
+ComponentTypes = {
+    # Mirror of the old core's name -> component class registry.
+    "plain": Plain,
+    "text": Plain,
+    "image": Image,
+    "record": Record,
+    "video": Video,
+    "file": File,
+    "face": Face,
+    "at": At,
+    "share": Share,
+    "reply": Reply,
+    "poke": Poke,
+    "forward": Forward,
+    "node": Node,
+    "nodes": Nodes,
+    "json": Json,
+    "location": Location,
+    "unknown": Unknown,
+}

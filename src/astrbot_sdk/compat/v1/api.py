@@ -119,6 +119,46 @@ class _SharedPreferences:
         await self._storage().set(f"sp:session:{umo}:{key}", value)
 
 
+def _utils_io_mod() -> ModuleType:
+    """Build the astrbot.core.utils.io shim (pure local helpers only)."""
+    from . import utils
+
+    mod = ModuleType("astrbot.core.utils.io")
+    for name in (
+        "download_image_by_url",
+        "download_file",
+        "save_temp_img",
+        "ensure_dir",
+        "remove_dir",
+        "port_checker",
+        "file_to_base64",
+        "get_local_ip_addresses",
+    ):
+        setattr(mod, name, getattr(utils, name))
+    return mod
+
+
+def _utils_session_lock_mod() -> ModuleType:
+    """Build the astrbot.core.utils.session_lock shim."""
+    from . import utils
+
+    mod = ModuleType("astrbot.core.utils.session_lock")
+    mod.SessionLockManager = utils.SessionLockManager
+    mod.session_lock_manager = utils.session_lock_manager
+    return mod
+
+
+def _utils_media_utils_mod() -> ModuleType:
+    """Build the astrbot.core.utils.media_utils shim (pure path helpers)."""
+    from . import utils
+
+    mod = ModuleType("astrbot.core.utils.media_utils")
+    mod.is_file_uri = utils.is_file_uri
+    mod.file_uri_to_path = utils.file_uri_to_path
+    mod.describe_media_ref = utils.describe_media_ref
+    return mod
+
+
 def _unsupported(feature: str) -> Any:
     def raise_loud(*args: Any, **kwargs: Any) -> Any:
         from .errors import IsolationUnsupportedError
@@ -135,8 +175,13 @@ def _unsupported_agent(*args: Any, **kwargs: Any) -> Any:
     return _unsupported("custom agent registration (@agent)")(*args, **kwargs)
 
 
-def install() -> None:
-    """Install the compat astrbot.api namespace and the core blocker."""
+def install(host_version: str | None = None) -> None:
+    """Install the compat astrbot.api namespace and the core blocker.
+
+    Args:
+        host_version: AstrBot core version reported by the Host, exposed to
+            legacy plugins as astrbot.core.config.default.VERSION.
+    """
     global _installed
     if _installed:
         return
@@ -177,6 +222,8 @@ def install() -> None:
     event_mod.MessageChain = components.MessageChain
     event_mod.MessageEventResult = components.MessageEventResult
     event_mod.ResultContentType = event.ResultContentType
+    event_mod.EventResultType = components.EventResultType
+    event_mod.CommandResult = components.MessageEventResult
 
     filter_mod = ModuleType("astrbot.api.event.filter")
     for name in dir(event.filter):
@@ -217,10 +264,12 @@ def install() -> None:
 
     platform_platform_mod = ModuleType("astrbot.core.platform.platform")
     platform_platform_mod.Platform = _ShellRecord
+    platform_platform_mod.PlatformStatus = event.PlatformStatus
 
     config_default_mod = ModuleType("astrbot.core.config.default")
     config_default_mod.DEFAULT_CONFIG = {}
     config_default_mod.CONFIG_METADATA_2 = {}
+    config_default_mod.VERSION = host_version or "unknown"
 
     platform_adapter_type_mod = ModuleType(
         "astrbot.core.star.filter.platform_adapter_type",
@@ -318,6 +367,8 @@ def install() -> None:
     platform_mod.MessageType = event.MessageType
     platform_mod.MessageMember = event.MessageMember
     platform_mod.AstrBotMessage = event.AstrBotMessage
+    platform_mod.Group = event.Group
+    platform_mod.PlatformStatus = event.PlatformStatus
     platform_mod.MessageSesion = star.MessageSesion
 
     command_filter_mod = ModuleType("astrbot.core.star.filter.command")
@@ -352,6 +403,9 @@ def install() -> None:
         "Poke",
         "Json",
         "Share",
+        "Location",
+        "Unknown",
+        "ComponentTypes",
     ):
         setattr(message_components_mod, name, getattr(components, name))
 
@@ -368,6 +422,8 @@ def install() -> None:
 
     astrbot_message_mod = ModuleType("astrbot.core.platform.astrbot_message")
     astrbot_message_mod.AstrBotMessage = event.AstrBotMessage
+    astrbot_message_mod.Group = event.Group
+    astrbot_message_mod.PlatformStatus = event.PlatformStatus
     astrbot_message_mod.MessageMember = event.MessageMember
     astrbot_message_mod.MessageType = event.MessageType
     astrbot_message_mod.MessageSesion = star.MessageSesion
@@ -394,6 +450,7 @@ def install() -> None:
 
     agent_message_mod = ModuleType("astrbot.core.agent.message")
     agent_message_mod.Message = _AgentMessage
+    agent_message_mod.ContentPart = _AgentPart
     agent_message_mod.UserMessageSegment = _AgentMessage
     agent_message_mod.AssistantMessageSegment = _AgentMessage
     agent_message_mod.SystemMessageSegment = _AgentMessage
@@ -406,6 +463,8 @@ def install() -> None:
     api_platform_mod = ModuleType("astrbot.api.platform")
     api_platform_mod.AstrBotMessage = event.AstrBotMessage
     api_platform_mod.AstrMessageEvent = event.AstrMessageEvent
+    api_platform_mod.Group = event.Group
+    api_platform_mod.PlatformStatus = event.PlatformStatus
     api_platform_mod.MessageMember = event.MessageMember
     api_platform_mod.MessageType = event.MessageType
     api_platform_mod.Platform = _ShellRecord
@@ -523,6 +582,9 @@ def install() -> None:
         "Poke",
         "Json",
         "Share",
+        "Location",
+        "Unknown",
+        "ComponentTypes",
         "MessageChain",
     ):
         setattr(components_mod, name, getattr(components, name))
@@ -533,6 +595,8 @@ def install() -> None:
 
     web_mod = ModuleType("astrbot.api.web")
     web_mod.request = web.ApiWebRequestProxy()
+    web_mod.PluginRequest = web.ApiWebRequestProxy
+    web_mod.bind_request_context = web.bind_request_context
     web_mod.PluginMultiDict = web.PluginMultiDict
     web_mod.PluginUploadFile = web.PluginUploadFile
     web_mod.json_response = web.json_response
@@ -681,6 +745,9 @@ def install() -> None:
     sys.modules["astrbot.core.config"] = config_mod
     sys.modules["astrbot.core.config.astrbot_config"] = astrbot_config_mod
     sys.modules["astrbot.core.utils"] = _namespace_package("astrbot.core.utils")
+    sys.modules["astrbot.core.utils.io"] = _utils_io_mod()
+    sys.modules["astrbot.core.utils.session_lock"] = _utils_session_lock_mod()
+    sys.modules["astrbot.core.utils.media_utils"] = _utils_media_utils_mod()
     sys.modules["astrbot.core.utils.astrbot_path"] = astrbot_path_mod
     sys.modules["astrbot.core.utils.session_waiter"] = session_waiter_mod
 

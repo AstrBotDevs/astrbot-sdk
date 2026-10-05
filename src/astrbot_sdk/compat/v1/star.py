@@ -66,6 +66,13 @@ class Context:
             "persona_manager is unavailable in isolated legacy mode"
         )
 
+    @property
+    def html_renderer(self) -> Any:
+        """Legacy HtmlRenderer facade backed by the render capability."""
+        from .html import HtmlRendererFacade
+
+        return HtmlRendererFacade()
+
     def get_config(self, umo: str | None = None) -> Any:
         """Return the global AstrBot configuration.
 
@@ -456,7 +463,26 @@ class CompatConfig(dict):
 
     The isolated Runner holds a snapshot of the plugin config; writes back
     to data/config need the Host, so save_config is unsupported here.
+
+    Mirrors AstrBotConfig's attribute access: ``config.key`` reads a
+    top-level item (missing keys yield None), and attribute assignment
+    writes into the in-memory dict without persisting.
     """
+
+    def __getattr__(self, item: str) -> Any:
+        try:
+            return self[item]
+        except KeyError:
+            return None
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        self[key] = value
+
+    def __delattr__(self, key: str) -> None:
+        try:
+            del self[key]
+        except KeyError:
+            raise AttributeError(key) from None
 
     def save_config(self, *args: Any, **kwargs: Any) -> None:
         """Reject persistence; config files live on the Host."""
@@ -527,6 +553,44 @@ class Star:
 
     async def terminate(self) -> None:
         """Called once when the plugin is unloaded."""
+
+    async def text_to_image(
+        self,
+        text: str,
+        return_url: bool = True,
+        template_name: str | None = None,
+        umo: str | None = None,
+    ) -> Any:
+        """Convert text to an image via the render capability.
+
+        Returns an AssetRef rather than a URL or path; legacy media
+        components accept it directly as their file source.
+        """
+        return await self.context.html_renderer.render_t2i(
+            text,
+            return_url=return_url,
+            template_name=template_name,
+        )
+
+    async def html_render(
+        self,
+        tmpl: str,
+        data: dict,
+        return_url: bool = True,
+        options: dict | None = None,
+        umo: str | None = None,
+    ) -> Any:
+        """Render a custom Jinja2 HTML template into an image.
+
+        Returns an AssetRef rather than a URL or path; legacy media
+        components accept it directly as their file source.
+        """
+        return await self.context.html_renderer.render_custom_template(
+            tmpl,
+            data,
+            return_url=return_url,
+            **(options or {}),
+        )
 
     async def put_kv_data(self, key: str, value: Any) -> None:
         await self.context.put_kv_data(key, value)

@@ -191,6 +191,14 @@ class StdioPluginServer:
         """
         self.plugin_root = plugin_root.resolve()
         self.legacy = legacy
+        if transport is None and writer is None:
+            # stdio carries protocol frames; a plugin (or a subprocess it
+            # spawns) writing to stdout would corrupt framing. Keep a private
+            # copy of fd 1 for the transport and point process stdout at
+            # stderr instead.
+            writer = os.fdopen(os.dup(1), "wb", closefd=True)
+            os.dup2(2, 1)
+            sys.stdout = sys.stderr
         self._transport = transport or StdioTransport(
             reader or sys.stdin.buffer,
             writer or sys.stdout.buffer,
@@ -410,8 +418,15 @@ class StdioPluginServer:
                 grants.append(CapabilityGrant(id=str(item["id"]), scope=scope))
 
             config = decode_value(frame.params.get("config"))
+            host_info = decode_value(frame.params.get("host") or {})
+            if not isinstance(host_info, Mapping):
+                host_info = {}
             if self.legacy:
-                loaded = self._load_legacy(config, CapabilitySet(grants))
+                loaded = self._load_legacy(
+                    config,
+                    CapabilitySet(grants),
+                    host_info=host_info,
+                )
             else:
                 loaded = load_plugin(
                     self.plugin_root,
@@ -519,7 +534,13 @@ class StdioPluginServer:
         finally:
             self._initializing = False
 
-    def _load_legacy(self, config: Any, grants: CapabilitySet) -> Any:
+    def _load_legacy(
+        self,
+        config: Any,
+        grants: CapabilitySet,
+        *,
+        host_info: Mapping[str, Any] | None = None,
+    ) -> Any:
         """Load a legacy plugin through the compat layer."""
         from ..compat.v1.loader import load_legacy_plugin
         from ..context import PluginContext, PluginInfo, RuntimeMode
@@ -546,6 +567,7 @@ class StdioPluginServer:
             ctx=ctx,
             config=config,
             logger=logging.getLogger(f"astrbot.plugin.{metadata.name}"),
+            host_info=host_info,
         )
 
     async def _invoke_host_capability(

@@ -199,6 +199,25 @@ def _bind_api_web_request(request: WebRequestInfo, body: bytes) -> None:
     _API_WEB_REQUEST_VAR.set((request, body))
 
 
+def bind_request_context(request: Any, body: bytes = b""):
+    """Bind a plugin Web request for the current async context.
+
+    Legacy parity for astrbot.api.web.bind_request_context; mostly used by
+    plugin tests that drive handlers outside a real request.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _bound():
+        token = _API_WEB_REQUEST_VAR.set((request, body))
+        try:
+            yield request
+        finally:
+            _API_WEB_REQUEST_VAR.reset(token)
+
+    return _bound()
+
+
 def _current_api_web_request() -> tuple[WebRequestInfo, bytes]:
     try:
         return _API_WEB_REQUEST_VAR.get()

@@ -206,6 +206,15 @@ PLATFORM_ADAPTER_NAMES = {
 }
 
 
+class PlatformStatus(enum.Enum):
+    """Legacy platform runtime status labels."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    ERROR = "error"
+    STOPPED = "stopped"
+
+
 class MessageType(enum.Enum):
     """Legacy platform message type."""
 
@@ -223,6 +232,32 @@ class MessageMember:
 
     def __str__(self) -> str:
         return f"User ID: {self.user_id}, Nickname: {self.nickname or 'N/A'}"
+
+
+class Group:
+    """Legacy group record (astrbot.core.platform.astrbot_message.Group)."""
+
+    def __init__(
+        self,
+        group_id: str = "",
+        group_name: str | None = None,
+        group_avatar: str | None = None,
+        group_owner: str | None = None,
+        group_admins: list[str] | None = None,
+        members: list[MessageMember] | None = None,
+        member_count: int | None = None,
+        **_: Any,
+    ) -> None:
+        self.group_id = group_id
+        self.group_name = group_name
+        self.group_avatar = group_avatar
+        self.group_owner = group_owner
+        self.group_admins = group_admins
+        self.members = members
+        self.member_count = member_count
+
+    def __str__(self) -> str:
+        return f"Group ID: {self.group_id}, Name: {self.group_name or 'N/A'}"
 
 
 class AstrBotMessage:

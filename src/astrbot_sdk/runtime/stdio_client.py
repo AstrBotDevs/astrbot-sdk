@@ -148,12 +148,15 @@ class StdioPluginClient:
         *,
         config: Any = None,
         granted_capabilities: CapabilitySet | None = None,
+        host_info: Mapping[str, Any] | None = None,
     ) -> PluginHandshake:
         """Start the Runner and negotiate protocol and plugin metadata.
 
         Args:
             config: Validated plugin configuration.
             granted_capabilities: Capabilities granted by the user.
+            host_info: Optional Host metadata (e.g. the AstrBot version)
+                forwarded to the Runner during initialization.
 
         Returns:
             Negotiated plugin handshake.
@@ -188,6 +191,7 @@ class StdioPluginClient:
                 {
                     "protocol_versions": [PROTOCOL_VERSION],
                     "config": encode_value(config),
+                    "host": encode_value(dict(host_info or {})),
                     "capabilities": [
                         {
                             "id": grant.id,

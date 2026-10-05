@@ -39,3 +39,25 @@ class HtmlRendererFacade:
                 extra=options.get("extra"),
             ),
         )
+
+    async def render_t2i(
+        self,
+        text: str,
+        use_network: bool = True,
+        return_url: bool = False,
+        template_name: str | None = None,
+        **_: Any,
+    ) -> Any:
+        """Render plain text into an image with the default t2i template.
+
+        Returns an AssetRef rather than a local path; media components accept
+        it directly.
+        """
+        from ...render import TextRenderOptions
+
+        if HtmlRendererFacade._ctx is None:
+            raise ValueError("html_renderer not initialized")
+        return await HtmlRendererFacade._ctx.render.text(
+            text,
+            options=TextRenderOptions(template_name=template_name),
+        )

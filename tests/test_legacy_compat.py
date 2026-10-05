@@ -435,3 +435,37 @@ async def test_legacy_command_group_custom_filter(tmp_path: Path) -> None:
         assert [r.message.text for r in results if r is not None] == ["public ok"]
     finally:
         await client.close()
+
+
+def test_compat_config_attribute_access() -> None:
+    # AstrBotConfig parity: top-level keys are readable as attributes,
+    # missing keys yield None, and attribute writes go to the dict.
+    from astrbot_sdk.compat.v1.star import CompatConfig
+
+    config = CompatConfig({"push_time": "08:00"})
+    assert config.push_time == "08:00"
+    assert config.missing_key is None
+
+    config.new_key = 42
+    assert config["new_key"] == 42
+
+    del config.new_key
+    assert "new_key" not in config
+    with pytest.raises(AttributeError):
+        del config.new_key
+
+
+def test_compat_media_components_accept_asset_ref() -> None:
+    # Render/speech capabilities return AssetRef; legacy media constructors
+    # must pass it through untouched instead of stringifying it.
+    from astrbot_sdk.assets import AssetRef
+    from astrbot_sdk.compat.v1.components import Image, to_sdk_segment
+    from astrbot_sdk.message_components import Image as SDKImage
+
+    asset = AssetRef(id="ast_test", filename="out.png")
+    image = Image.fromFileSystem(asset)
+    assert image.file is asset
+
+    segment = to_sdk_segment(Image.fromURL(asset))
+    assert isinstance(segment, SDKImage)
+    assert segment.source is asset

@@ -191,6 +191,26 @@
   variadic 容忍、空 __tool_params__ 逃逸、declared-but-empty 参数
   短路、重插件 initialize 超时（start_timeout=60s）。唯一未过：
   palworld（register_web_api，设计排除）。
+- [x] **全量真实插件验收**（2026-10-05，2384 个插件，1750 ok / 634 fail，
+  73.4%）：corpus `~/astrbot-plugin-research-1005` 全部 2384 个插件根，
+  每插件独立 venv（`--system-site-packages` + core site-packages 链接）、
+  uv 安装声明依赖、legacy 握手 + 全量 capability grant，测完即删 venv。
+  本轮修复吃掉的分桶：config schema 嵌套 items 展开（76）、utils.io
+  shim（25）、Location/Unknown（7）、VERSION 注入（4）、Group/
+  PlatformStatus（6）、session_lock（14）、ContentPart（4）、
+  stdout 污染协议帧（7 中 3 恢复——插件 print/pip 子进程写 fd 1，
+  Runner 现在把 fd 1 重定向到 stderr、协议帧走 dup 后的私有 fd）。
+  剩余失败分桶（设计排除为主）：`astrbot.core.platform.sources`
+  平台事件类 133（**待设计决策**：in-process 回退 or 事件映射层）、
+  `astrbot.core` 直接导入 53、`Context.get_config()` 42、
+  `register_platform_adapter` 27、`config.save_config()` 18、
+  `activate_llm_tool`/`get_llm_tool_manager` 13、`pipeline` 8、
+  `persona_manager` 5（等 personas 能力）、`star.config` 4、
+  `MediaResolver`/`compress_image`/`convert_audio` 4+（候选：
+  并入 assets 能力）、`extract_quoted_message_images`（需平台适配器
+  访问，host 能力候选）。其余为插件自身问题：未声明三方依赖、
+  缺字体/数据文件、zbar 原生库、导入期自安装依赖超握手超时、
+  UTF-16/BOM 配置文件。
 - [ ] 旧版兼容层 P3（长尾，按需）：`persona_manager`（等 personas 能力）、
   `astrbot.api.web` 路由（等 web 能力设计）、`EmbeddingProvider` 等
   类型外观的剩余零散项、`star_handlers_registry` 等注册表内省

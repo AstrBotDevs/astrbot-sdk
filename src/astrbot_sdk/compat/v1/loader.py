@@ -6,7 +6,7 @@ import inspect
 import logging
 import re
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -682,6 +682,7 @@ def load_legacy_plugin(
     ctx: Any,
     config: Any = None,
     logger: logging.Logger | None = None,
+    host_info: Any = None,
 ) -> CompatLoadedPlugin:
     """Import one legacy plugin and build new-style registrations.
 
@@ -690,6 +691,8 @@ def load_legacy_plugin(
         ctx: New SDK plugin context used by the compat facade.
         config: Plugin configuration dict.
         logger: Optional logger.
+        host_info: Optional Host metadata forwarded during initialization;
+            the ``version`` entry feeds astrbot.core.config.default.VERSION.
 
     Returns:
         The compat loaded plugin.
@@ -703,7 +706,11 @@ def load_legacy_plugin(
     root = Path(plugin_root).resolve()
     metadata = _load_legacy_metadata(root)
 
-    compat_api.install()
+    host_version = None
+    if isinstance(host_info, Mapping):
+        version = host_info.get("version")
+        host_version = str(version) if version else None
+    compat_api.install(host_version=host_version)
     namespace = _install_namespace(root)
     module_name = f"{namespace}.main"
     import importlib
