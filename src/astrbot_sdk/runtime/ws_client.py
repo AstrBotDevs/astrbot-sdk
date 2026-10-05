@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from ..capabilities import CapabilitySet
+from ..capabilities import DEFAULT_CAPABILITY_IDS, CapabilityGrant, CapabilitySet
 from ..errors import HostUnavailable
 from .stdio_client import StdioPluginClient
 from .transport import FrameTransport, WebSocketTransport
@@ -34,9 +34,19 @@ class WSPluginClient(StdioPluginClient):
         self,
         granted_capabilities: CapabilitySet | None,
     ) -> CapabilitySet:
-        # External runners have no local metadata to intersect with; the
-        # listener configuration declares the effective grants host-side.
-        return granted_capabilities or CapabilitySet()
+        # External runners have no local metadata to intersect with: the
+        # listener configuration declares the effective grants host-side,
+        # and the runner-level defaults (KV storage, asset transfer) are
+        # auto-granted like they are for local runners.
+        requested = granted_capabilities or CapabilitySet()
+        requested_ids = {grant.id for grant in requested.values()}
+        return CapabilitySet(
+            list(requested.values())
+            + [
+                CapabilityGrant(id=capability_id)
+                for capability_id in sorted(DEFAULT_CAPABILITY_IDS - requested_ids)
+            ]
+        )
 
     async def _open_transport(self) -> FrameTransport:
         """Attach to the pre-accepted connection."""

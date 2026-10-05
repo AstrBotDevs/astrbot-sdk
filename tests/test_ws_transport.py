@@ -163,7 +163,13 @@ class TestPlugin(Plugin):
                 [CapabilityGrant("llm.generate", {"providers": ["default"]})]
             )
             try:
-                await client.start(granted_capabilities=grants)
+                handshake = await client.start(granted_capabilities=grants)
+                # Spec grants plus the runner-level defaults.
+                assert handshake.capabilities == (
+                    "llm.generate",
+                    "assets.transfer",
+                    "storage.kv",
+                )
                 stream = client.invoke("ask")
                 result = await anext(stream)
                 assert isinstance(result, MessageResult)
