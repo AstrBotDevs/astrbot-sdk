@@ -49,6 +49,7 @@ class WebRequestInfo:
     body_size: int
     body_token: str | None
     username: str | None
+    client_host: str | None = None
 
 
 @register_protocol_dataclass
@@ -81,6 +82,7 @@ class WebRequest:
         self.path_params = dict(info.path_params)
         self.headers = dict(info.headers)
         self.username = info.username
+        self.client_host = info.client_host
         self.query = _QueryMultiDict(info.query)
         self._body_cache: bytes | None = None
 

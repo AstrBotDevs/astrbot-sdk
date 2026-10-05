@@ -158,8 +158,29 @@ async def invoke_web_route(
     ):
         quart_g.username = request.username
         _bind_api_web_request(request, body)
-        outcome = entry.handler(**dict(request.path_params))
-        result = await outcome if inspect.isawaitable(outcome) else outcome
+        try:
+            outcome = entry.handler(**dict(request.path_params))
+            result = await outcome if inspect.isawaitable(outcome) else outcome
+        except Exception as exc:
+            # quart.abort() raises a werkzeug HTTPException; translate it
+            # into the corresponding HTTP response instead of a 500.
+            from werkzeug.exceptions import HTTPException
+
+            if not isinstance(exc, HTTPException):
+                raise
+            description = exc.description or exc.name
+            info = WebResponseInfo(
+                status=exc.code or 500,
+                headers={"content-type": "text/plain; charset=utf-8"},
+            )
+
+            async def aborted() -> AsyncIterator[bytes]:
+                yield str(description).encode()
+
+            yield {"info": info}
+            async for chunk in aborted():
+                yield {"chunk": chunk}
+            return
         info, chunks = await _normalize_quart_result(result, app)
         yield {"info": info}
         async for chunk in chunks:
@@ -267,6 +288,16 @@ class ApiWebRequestProxy:
         return _current_api_web_request()[0].username
 
     @property
+    def client_host(self) -> str | None:
+        return _current_api_web_request()[0].client_host
+
+    @property
+    def cookies(self) -> dict:
+        # Dashboard credentials never cross the boundary, so plugin-scoped
+        # cookie reading degrades to an empty mapping rather than failing.
+        return {}
+
+    @property
     def query(self) -> PluginMultiDict:
         return PluginMultiDict(list(_current_api_web_request()[0].query))
 
@@ -298,6 +329,74 @@ class ApiWebRequestProxy:
             return PluginMultiDict([])
         _, files = _parse_multipart(content_type, await self.body())
         return PluginMultiDict(files)
+
+
+def json_response(
+    data: Any = None,
+    *,
+    status_code: int = 200,
+    headers: dict | None = None,
+) -> Any:
+    """Mirror astrbot.api.web.json_response (returns a starlette response)."""
+    from fastapi.encoders import jsonable_encoder
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(
+        jsonable_encoder({} if data is None else data),
+        status_code=status_code,
+        headers=headers,
+    )
+
+
+def error_response(
+    message: str,
+    *,
+    status_code: int = 400,
+    data: Any = None,
+    headers: dict | None = None,
+) -> Any:
+    """Mirror astrbot.api.web.error_response (AstrBot error envelope)."""
+    return json_response(
+        {"status": "error", "message": message, "data": data},
+        status_code=status_code,
+        headers=headers,
+    )
+
+
+def file_response(
+    path: Any,
+    *,
+    filename: str | None = None,
+    content_type: str | None = None,
+    headers: dict | None = None,
+) -> Any:
+    """Mirror astrbot.api.web.file_response (starlette FileResponse)."""
+    from starlette.responses import FileResponse
+
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type=content_type,
+        headers=headers,
+    )
+
+
+def stream_response(
+    content: Any,
+    *,
+    content_type: str = "text/event-stream",
+    status_code: int = 200,
+    headers: dict | None = None,
+) -> Any:
+    """Mirror astrbot.api.web.stream_response (starlette StreamingResponse)."""
+    from starlette.responses import StreamingResponse
+
+    return StreamingResponse(
+        content,
+        media_type=content_type,
+        status_code=status_code,
+        headers=headers,
+    )
 
 
 def _parse_multipart(content_type: str, body: bytes) -> tuple[list, list]:

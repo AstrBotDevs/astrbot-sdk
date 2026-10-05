@@ -16,6 +16,12 @@ from astrbot_sdk.web import WebRequestInfo
 LEGACY_PLUGIN = """
 from quart import g, jsonify, request
 
+from astrbot.api.web import (
+    error_response,
+    json_response,
+    request as api_request,
+    stream_response,
+)
 from astrbot.api.star import Context, Star
 
 
@@ -27,6 +33,12 @@ class LegacyWebPlugin(Star):
             "/legacy/echo", self.echo, ["POST"], "echo body")
         self.context.register_web_api(
             "/legacy/whoami", self.whoami, ["GET"], "current user")
+        self.context.register_web_api(
+            "/legacy/forbidden", self.forbidden, ["GET"], "abort test")
+        self.context.register_web_api(
+            "/legacy/helpers", self.helpers, ["GET"], "api.web helpers")
+        self.context.register_web_api(
+            "/legacy/sse", self.sse, ["GET"], "stream test")
 
     async def get_item(self, item_id):
         q = request.args.get("verbose", "no")
@@ -38,6 +50,20 @@ class LegacyWebPlugin(Star):
 
     async def whoami(self):
         return {"user": g.username}
+
+    async def forbidden(self):
+        from quart import abort
+
+        abort(403, description="no entry")
+
+    async def helpers(self):
+        host = api_request.client_host
+        if host is None:
+            return error_response("no host", status_code=400)
+        return json_response({"host": host})
+
+    async def sse(self):
+        return stream_response(["data: 1\\n\\n", "data: 2\\n\\n"])
 """
 
 
@@ -65,6 +91,7 @@ def make_request(
     query: tuple = (),
     body: bytes | None = None,
     username: str | None = None,
+    client_host: str | None = None,
 ) -> WebRequestInfo:
     return WebRequestInfo(
         route=route,
@@ -77,6 +104,7 @@ def make_request(
         body_size=len(body or b""),
         body_token=None,
         username=username,
+        client_host=client_host,
     )
 
 
@@ -113,6 +141,9 @@ async def test_legacy_web_routes(tmp_path: Path) -> None:
             "/legacy/items/<item_id>",
             "/legacy/echo",
             "/legacy/whoami",
+            "/legacy/forbidden",
+            "/legacy/helpers",
+            "/legacy/sse",
         }
 
         import json
@@ -154,5 +185,45 @@ async def test_legacy_web_routes(tmp_path: Path) -> None:
         ]
         payload = json.loads(b"".join(c["chunk"] for c in items[1:]))
         assert payload == {"user": "admin"}
+
+        # quart.abort maps to its status code, not a generic 500.
+        items = [
+            item
+            async for item in client.invoke_web(
+                make_request("/legacy/forbidden", path="/legacy/forbidden"),
+            )
+        ]
+        assert items[0]["info"].status == 403
+        assert b"no entry" in b"".join(c["chunk"] for c in items[1:])
+
+        # api.web helpers work and client_host crosses the boundary.
+        items = [
+            item
+            async for item in client.invoke_web(
+                make_request(
+                    "/legacy/helpers",
+                    path="/legacy/helpers",
+                    client_host="10.0.0.1",
+                ),
+            )
+        ]
+        payload = json.loads(b"".join(c["chunk"] for c in items[1:]))
+        assert payload == {"host": "10.0.0.1"}
+
+        # stream_response streams chunks with its media type.
+        items = [
+            item
+            async for item in client.invoke_web(
+                make_request("/legacy/sse", path="/legacy/sse"),
+            )
+        ]
+        assert (
+            items[0]["info"]
+            .headers["content-type"]
+            .startswith(
+                "text/event-stream",
+            )
+        )
+        assert b"".join(c["chunk"] for c in items[1:]) == b"data: 1\n\ndata: 2\n\n"
     finally:
         await client.close()

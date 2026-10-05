@@ -16,6 +16,7 @@ test = [
     # Legacy compat replay runs handlers in real Quart/Starlette contexts.
     "quart>=0.20",
     "starlette>=0.47",
+    "fastapi>=0.124",
     "aiofiles>=25.1",
 ]
 

@@ -480,6 +480,10 @@ def install() -> None:
     web_mod.request = web.ApiWebRequestProxy()
     web_mod.PluginMultiDict = web.PluginMultiDict
     web_mod.PluginUploadFile = web.PluginUploadFile
+    web_mod.json_response = web.json_response
+    web_mod.error_response = web.error_response
+    web_mod.file_response = web.file_response
+    web_mod.stream_response = web.stream_response
     try:
         from starlette.responses import (
             FileResponse,
