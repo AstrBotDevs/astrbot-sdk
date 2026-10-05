@@ -61,6 +61,25 @@
 
 ## 已决策的后续功能
 
+- [ ] **session 等待能力（session_waiter，设计已定，待实现）**：
+  语料中 57 个插件使用（多轮问答/向导是真实需求）。core 机制 =
+  全局 session 注册表 + builtin Main 的 maxsize 优先级 ALL 事件
+  拦截（匹配则 trigger + stop_event）+ plugin 进程内 future。
+  隔离模式设计：注册表与拦截在 Host（bridge 侧建镜像表，匹配事件
+  改推 `session.matched` RPC 通知并 stop_event），future 与多轮
+  状态留在 plugin 进程；`controller.keep(t)` = 交付后重新武装一次
+  性等待，`stop()` = 注销；超时放 Host 侧（插件崩溃不泄漏会话）。
+  自定义 SessionFilter 语料中很常见（10+ 种，多为 umo+sender/group
+  的字段组合），契约改为声明式字段键（plugin 声明 key 由哪些事件
+  字段组成，Host 对入站事件计算同键匹配），纯代码 filter v1 响报。
+  同一 session_id 冲突先到先得并响报。legacy 的
+  `@session_waiter` 装饰器在 Runner 内用该能力完整复刻。
+- [ ] **utils.io 工具 shim（按需）**：语料 28 个插件导入
+  `astrbot.core.utils.io`（多为 `download_image_by_url`/
+  `save_temp_img` 等不碰 host 状态的纯工具），可在 compat 层给
+  纯函数 shim（下载走 plugin 进程自己，临时文件走 data/temp
+  目录），把这类从设计排除救回。
+
 - [x] **web.route（HTTP over RPC，已完成）**：`ctx.web.route` 注册的路由
   经 bridge 挂进 dashboard `registered_web_apis`，请求消毒（剥
   Cookie/Authorization）后回放为 WebRequestInfo，响应为
