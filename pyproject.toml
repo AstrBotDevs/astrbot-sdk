@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "packaging>=24.2",
     "pyyaml>=6.0",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]

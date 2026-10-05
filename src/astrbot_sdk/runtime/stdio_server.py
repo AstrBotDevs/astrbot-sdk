@@ -41,6 +41,7 @@ from ..results import Propagation
 from ..tools import tool_params_schema
 from .loader import LoadedPlugin, load_plugin
 from .peer import Peer
+from .transport import FrameTransport, StdioTransport
 
 _SUPPORTED_PARAM_TYPES = {"str": str, "int": int, "float": float, "bool": bool}
 
@@ -176,21 +177,25 @@ class StdioPluginServer:
         reader: BinaryIO | None = None,
         writer: BinaryIO | None = None,
         legacy: bool = False,
+        transport: FrameTransport | None = None,
     ) -> None:
-        """Initialize the stdio Runner.
+        """Initialize the Runner server.
 
         Args:
             plugin_root: Plugin repository root.
             reader: Binary input stream. Defaults to process stdin.
             writer: Binary output stream. Defaults to process stdout.
             legacy: Load the plugin through the legacy compat layer.
+            transport: Frame transport override (e.g. WebSocket). Defaults to
+                a stdio transport over reader/writer.
         """
         self.plugin_root = plugin_root.resolve()
         self.legacy = legacy
-        self.reader = reader or sys.stdin.buffer
-        self.writer = writer or sys.stdout.buffer
+        self._transport = transport or StdioTransport(
+            reader or sys.stdin.buffer,
+            writer or sys.stdout.buffer,
+        )
         self.loaded_plugin: LoadedPlugin | None = None
-        self._write_lock = asyncio.Lock()
         self._peer = Peer(
             send=self._send,
             request_handler=self._handle_request,
@@ -217,11 +222,8 @@ class StdioPluginServer:
         """
         try:
             while not self._closing:
-                line = await asyncio.to_thread(
-                    self.reader.readline,
-                    MAX_FRAME_BYTES + 1,
-                )
-                if not line:
+                line = await self._transport.read()
+                if line is None:
                     break
                 if len(line) > MAX_FRAME_BYTES:
                     await self._send(
@@ -290,10 +292,7 @@ class StdioPluginServer:
         Args:
             frame: Frame to send to the Host.
         """
-        data = encode_frame(frame)
-        async with self._write_lock:
-            self.writer.write(data)
-            self.writer.flush()
+        await self._transport.write(encode_frame(frame))
 
     async def _handle_request(self, frame: RequestFrame) -> Any:
         """Dispatch one generic Host-to-Runner request.

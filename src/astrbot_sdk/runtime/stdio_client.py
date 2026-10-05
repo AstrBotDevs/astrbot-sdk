@@ -47,6 +47,7 @@ from ..tools import ToolCallContext
 from .env import runner_env
 from .metadata import load_metadata
 from .peer import Peer
+from .transport import FrameTransport, StreamTransport
 
 HostCapabilityHandler = Callable[
     [CapabilityGrant, str, Mapping[str, Any]],
@@ -84,11 +85,16 @@ class PluginHandshake:
 
 
 class StdioPluginClient:
-    """Launch and control one isolated SDK plugin Runner."""
+    """Control one isolated SDK plugin Runner over a frame transport.
+
+    The base class spawns the Runner as a local subprocess and talks over
+    its stdio pipes; subclasses (for example the WebSocket client) attach
+    to Runners spawned elsewhere by overriding the transport hooks.
+    """
 
     def __init__(
         self,
-        plugin_root: Path,
+        plugin_root: Path | None,
         *,
         python_executable: Path | str | None = None,
         timeout: float = 10.0,
@@ -101,7 +107,8 @@ class StdioPluginClient:
         """Initialize the Host-side stdio client.
 
         Args:
-            plugin_root: Plugin repository root.
+            plugin_root: Plugin repository root, or None when the Runner is
+                external and the Host has no local checkout.
             python_executable: Python executable in the plugin environment.
             timeout: Request and process shutdown timeout in seconds.
             logger: Logger used for Runner stderr.
@@ -111,7 +118,7 @@ class StdioPluginClient:
             start_timeout: Timeout for the initialize handshake; defaults to
                 timeout. Heavy plugins may need a larger value.
         """
-        self.plugin_root = plugin_root.resolve()
+        self.plugin_root = plugin_root.resolve() if plugin_root is not None else None
         self.legacy = legacy
         self._extra_env = dict(env or {})
         self.start_timeout = start_timeout if start_timeout is not None else timeout
@@ -133,7 +140,8 @@ class StdioPluginClient:
             str,
             asyncio.Queue[int | Exception],
         ] = {}
-        self._write_lock = asyncio.Lock()
+        self._transport: FrameTransport | None = None
+        self._started = False
 
     async def start(
         self,
@@ -156,50 +164,13 @@ class StdioPluginClient:
             InvalidRequest: The Runner returns malformed handshake data.
             RemotePluginError: Plugin loading or startup fails remotely.
         """
-        if self._process is not None:
-            raise Conflict("stdio plugin client is already started")
+        if self._started:
+            raise Conflict("plugin client is already started")
+        self._started = True
 
-        if self.legacy:
-            # Legacy plugins declare no capabilities; the compat facade is
-            # constrained by whatever the Host grants directly.
-            grants = granted_capabilities or CapabilitySet()
-        else:
-            declared_capabilities = load_metadata(
-                self.plugin_root,
-            ).capabilities.all_ids
-            requested = granted_capabilities or CapabilitySet()
-            grants = CapabilitySet(
-                [
-                    grant
-                    for grant in requested.values()
-                    if grant.id in declared_capabilities
-                ]
-                + [
-                    CapabilityGrant(id=capability_id)
-                    for capability_id in sorted(
-                        DEFAULT_CAPABILITY_IDS - declared_capabilities
-                    )
-                ]
-            )
+        grants = self._compute_grants(granted_capabilities)
         self._granted_capabilities = grants
-        argv = [
-            self.python_executable,
-            "-m",
-            "astrbot_sdk.runtime",
-            "--stdio",
-            "--plugin-root",
-            str(self.plugin_root),
-        ]
-        if self.legacy:
-            argv.append("--legacy")
-        self._process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=runner_env(self._extra_env),
-            limit=MAX_FRAME_BYTES + 1,
-        )
+        self._transport = await self._open_transport()
         self._peer = Peer(
             send=self._send,
             request_handler=self._handle_runner_request,
@@ -208,7 +179,8 @@ class StdioPluginClient:
             internal_error_code="HOST_RUNTIME_ERROR",
         )
         self._reader_task = asyncio.create_task(self._read_frames())
-        self._stderr_task = asyncio.create_task(self._read_stderr())
+        if self._process is not None and self._process.stderr is not None:
+            self._stderr_task = asyncio.create_task(self._read_stderr())
 
         try:
             result = await self._request(
@@ -229,25 +201,90 @@ class StdioPluginClient:
             self.handshake = handshake
             return handshake
         except Exception:
-            if self._process.returncode is None:
-                self._process.terminate()
-                try:
-                    await asyncio.wait_for(
-                        self._process.wait(),
-                        timeout=self.timeout,
-                    )
-                except TimeoutError:
-                    self._process.kill()
-                    await self._process.wait()
+            await self._close_transport()
             if self._peer is not None:
                 await self._peer.close(
-                    HostUnavailable("stdio plugin Runner failed to initialize")
+                    HostUnavailable("plugin Runner failed to initialize")
                 )
             await self._finish_tasks()
+            self._transport = None
             self._process = None
             self._peer = None
             self._granted_capabilities = CapabilitySet()
+            self._started = False
             raise
+
+    def _compute_grants(
+        self,
+        granted_capabilities: CapabilitySet | None,
+    ) -> CapabilitySet:
+        """Resolve the effective capability grants for this Runner.
+
+        Local runners are intersected with the plugin's declared
+        capabilities from its on-disk metadata; legacy runners declare
+        nothing, so the Host grants apply directly.
+        """
+        if self.legacy:
+            # Legacy plugins declare no capabilities; the compat facade is
+            # constrained by whatever the Host grants directly.
+            return granted_capabilities or CapabilitySet()
+        if self.plugin_root is None:
+            raise InvalidRequest("local runners require a plugin root")
+        declared_capabilities = load_metadata(
+            self.plugin_root,
+        ).capabilities.all_ids
+        requested = granted_capabilities or CapabilitySet()
+        return CapabilitySet(
+            [grant for grant in requested.values() if grant.id in declared_capabilities]
+            + [
+                CapabilityGrant(id=capability_id)
+                for capability_id in sorted(
+                    DEFAULT_CAPABILITY_IDS - declared_capabilities
+                )
+            ]
+        )
+
+    async def _open_transport(self) -> FrameTransport:
+        """Spawn the local Runner subprocess and wrap its stdio pipes."""
+        argv = [
+            self.python_executable,
+            "-m",
+            "astrbot_sdk.runtime",
+            "--stdio",
+            "--plugin-root",
+            str(self.plugin_root),
+        ]
+        if self.legacy:
+            argv.append("--legacy")
+        self._process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=runner_env(self._extra_env),
+            limit=MAX_FRAME_BYTES + 1,
+        )
+        if self._process.stdout is None or self._process.stdin is None:
+            raise HostUnavailable("stdio plugin Runner pipes are unavailable")
+        return StreamTransport(self._process.stdout, self._process.stdin)
+
+    async def _close_transport(self) -> None:
+        """Close the transport, escalating to terminate/kill if needed."""
+        transport = self._transport
+        process = self._process
+        if transport is not None:
+            with contextlib.suppress(BrokenPipeError, ConnectionError):
+                await transport.close()
+        if process is not None and process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=self.timeout)
+            except TimeoutError:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=self.timeout)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
 
     async def invoke(
         self,
@@ -271,8 +308,8 @@ class StdioPluginClient:
             InvalidRequest: The Runner sends an invalid stream sequence.
             RemotePluginError: The remote handler fails.
         """
-        if self._process is None or self._process.returncode is not None:
-            raise HostUnavailable("stdio plugin Runner is not running")
+        if not self.is_running:
+            raise HostUnavailable("plugin Runner is not running")
 
         invocation_id = f"host-invoke:{uuid.uuid4().hex}"
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
@@ -328,11 +365,7 @@ class StdioPluginClient:
                     )
         finally:
             self._streams.pop(invocation_id, None)
-            if (
-                not completed
-                and self._process is not None
-                and self._process.returncode is None
-            ):
+            if not completed and self.is_running:
                 with contextlib.suppress(HostUnavailable):
                     await self._send(CancelFrame(id=invocation_id))
 
@@ -359,8 +392,8 @@ class StdioPluginClient:
         params: Mapping[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         """Run one streaming invocation and yield decoded items."""
-        if self._process is None or self._process.returncode is not None:
-            raise HostUnavailable("stdio plugin Runner is not running")
+        if not self.is_running:
+            raise HostUnavailable("plugin Runner is not running")
         invocation_id = f"host-invoke:{uuid.uuid4().hex}"
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
         self._streams[invocation_id] = queue
@@ -401,11 +434,7 @@ class StdioPluginClient:
                     )
         finally:
             self._streams.pop(invocation_id, None)
-            if (
-                not completed
-                and self._process is not None
-                and self._process.returncode is None
-            ):
+            if not completed and self.is_running:
                 with contextlib.suppress(HostUnavailable):
                     await self._send(CancelFrame(id=invocation_id))
 
@@ -549,12 +578,11 @@ class StdioPluginClient:
             process.kill()
 
     async def close(self) -> None:
-        """Shut down the Runner and release process resources."""
-        process = self._process
-        if process is None:
+        """Shut down the Runner and release transport resources."""
+        if not self._started:
             return
         try:
-            if process.returncode is None:
+            if self.is_running:
                 with contextlib.suppress(
                     HostUnavailable,
                     RemotePluginError,
@@ -564,31 +592,17 @@ class StdioPluginClient:
                         self._request("shutdown", {}),
                         timeout=self.timeout,
                     )
-                if process.stdin is not None:
-                    process.stdin.close()
-                    with contextlib.suppress(BrokenPipeError, ConnectionError):
-                        await process.stdin.wait_closed()
-                if process.returncode is None:
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=self.timeout)
-                    except TimeoutError:
-                        process.terminate()
-                        try:
-                            await asyncio.wait_for(
-                                process.wait(),
-                                timeout=self.timeout,
-                            )
-                        except TimeoutError:
-                            process.kill()
-                            await process.wait()
+            await self._close_transport()
         finally:
             if self._peer is not None:
-                await self._peer.close(HostUnavailable("stdio plugin Runner is closed"))
+                await self._peer.close(HostUnavailable("plugin Runner is closed"))
             await self._finish_tasks()
+            self._transport = None
             self._process = None
             self._peer = None
             self.handshake = None
             self._granted_capabilities = CapabilitySet()
+            self._started = False
 
     async def _request(
         self,
@@ -803,27 +817,22 @@ class StdioPluginClient:
             frame: Frame to send.
 
         Raises:
-            HostUnavailable: The Runner stdin is closed.
+            HostUnavailable: The Runner transport is closed.
         """
-        process = self._process
-        if process is None or process.stdin is None or process.returncode is not None:
-            raise HostUnavailable("stdio plugin Runner is not running")
-        try:
-            async with self._write_lock:
-                process.stdin.write(encode_frame(frame))
-                await process.stdin.drain()
-        except (BrokenPipeError, ConnectionError) as exc:
-            raise HostUnavailable("stdio plugin Runner disconnected") from exc
+        transport = self._transport
+        if transport is None or not self.is_running:
+            raise HostUnavailable("plugin Runner is not running")
+        await transport.write(encode_frame(frame))
 
     async def _read_frames(self) -> None:
-        """Dispatch Runner stdout frames to peer calls and invocations."""
-        process = self._process
+        """Dispatch Runner frames to peer calls and invocations."""
+        transport = self._transport
         peer = self._peer
-        if process is None or process.stdout is None or peer is None:
+        if transport is None or peer is None:
             return
-        failure: Exception = HostUnavailable("stdio plugin Runner disconnected")
+        failure: Exception = HostUnavailable("plugin Runner disconnected")
         try:
-            while line := await process.stdout.readline():
+            while (line := await transport.read()) is not None:
                 frame = decode_frame(line)
                 if await peer.receive(frame):
                     continue

@@ -12,10 +12,21 @@ from .metadata import (
 )
 from .stdio_client import HandlerDescriptor, PluginHandshake, StdioPluginClient
 from .stdio_server import StdioPluginServer, serve_stdio_plugin
+from .transport import (
+    FrameTransport,
+    StdioTransport,
+    StreamTransport,
+    WebSocketTransport,
+)
+from .ws_client import WSPluginClient
+from .ws_listener import WSPluginListener
+from .ws_runner import RUNNER_TOKEN_ENV, serve_ws_plugin
 
 __all__ = [
+    "RUNNER_TOKEN_ENV",
     "CapabilityDeclarations",
     "CapabilityRequirement",
+    "FrameTransport",
     "HandlerDescriptor",
     "LoadedPlugin",
     "PluginAPIFamily",
@@ -24,10 +35,16 @@ __all__ = [
     "RuntimeMetadata",
     "StdioPluginClient",
     "StdioPluginServer",
+    "StdioTransport",
+    "StreamTransport",
+    "WSPluginClient",
+    "WSPluginListener",
+    "WebSocketTransport",
     "detect_api_family",
     "load_metadata",
     "load_plugin",
     "parse_metadata",
     "read_metadata",
     "serve_stdio_plugin",
+    "serve_ws_plugin",
 ]
