@@ -798,10 +798,14 @@ def load_legacy_plugin(
 
     registrations: list[HandlerRegistration] = []
     for method_name in dir(instance):
-        method = getattr(instance, method_name)
-        filters = getattr(method, _FILTERS_ATTR, None)
+        # Read the raw class attribute first: arbitrary properties on the
+        # instance may raise or perform side effects, and they can never be
+        # decorated handlers anyway.
+        raw = inspect.getattr_static(instance, method_name)
+        filters = getattr(raw, _FILTERS_ATTR, None)
         if not filters:
             continue
+        method = getattr(instance, method_name)
         spec, custom_filters = _compile_filters(filters)
         if spec.kind is HandlerKind.TOOL:
             handler = _wrap_tool(instance, method)

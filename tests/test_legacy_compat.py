@@ -560,3 +560,54 @@ async def test_legacy_platform_event_shims() -> None:
     invoke.reset_mock()
     await bot_event.bot.api.call_action("set_group_ban", group_id="g", user_id="u")
     assert invoke.await_args.args[2]["action"] == "set_group_ban"
+
+
+@pytest.mark.asyncio
+async def test_legacy_plugin_with_raising_property_loads(tmp_path: Path) -> None:
+    # Handler discovery scans dir(instance); arbitrary properties may raise
+    # (e.g. a bare assert) and must not abort loading.
+    plugin_root = tmp_path / "legacy_property"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy_property",
+                "desc": "plugin with a raising property",
+                "author": "AstrBot",
+                "version": "1.0.0",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "main.py").write_text(
+        """
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star
+
+
+class PropertyPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    @property
+    def settings(self):
+        assert self.uninitialized is not None
+
+    @filter.command("hello")
+    async def hello(self, event: AstrMessageEvent):
+        yield event.plain_result("hi")
+""",
+        encoding="utf-8",
+    )
+
+    client = StdioPluginClient(
+        plugin_root,
+        python_executable=Path(sys.executable),
+        capability_handler=None,
+        legacy=True,
+    )
+    try:
+        handshake = await client.start(granted_capabilities=CapabilitySet())
+        assert {h.id for h in handshake.handlers} == {"hello"}
+    finally:
+        await client.close()
