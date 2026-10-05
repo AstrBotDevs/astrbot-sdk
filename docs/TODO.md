@@ -200,9 +200,7 @@
   PlatformStatus（6）、session_lock（14）、ContentPart（4）、
   stdout 污染协议帧（7 中 3 恢复——插件 print/pip 子进程写 fd 1，
   Runner 现在把 fd 1 重定向到 stderr、协议帧走 dup 后的私有 fd）。
-  剩余失败分桶（设计排除为主）：`astrbot.core.platform.sources`
-  平台事件类 133（**待设计决策**：in-process 回退 or 事件映射层）、
-  `astrbot.core` 直接导入 53、`Context.get_config()` 42、
+  剩余失败分桶（设计排除为主）：`astrbot.core` 直接导入 53、`Context.get_config()` 42、
   `register_platform_adapter` 27、`config.save_config()` 18、
   `activate_llm_tool`/`get_llm_tool_manager` 13、`pipeline` 8、
   `persona_manager` 5（等 personas 能力）、`star.config` 4、
@@ -211,6 +209,18 @@
   访问，host 能力候选）。其余为插件自身问题：未声明三方依赖、
   缺字体/数据文件、zbar 原生库、导入期自安装依赖超握手超时、
   UTF-16/BOM 配置文件。
+- [x] 旧版兼容层 platform.raw（已完成，仅 legacy）：133 个插件直接
+  import `astrbot.core.platform.sources.*`（468 处 aiocqhttp）做两件事——
+  isinstance 事件类判断、`event.bot.api.call_action` 原生 OneBot
+  逃生舱。方案（用户拍板选项 2）：compat 新增 `platform_events.py`，
+  按事件 platform 元数据选择真实的 facade 子类（isinstance 诚实，
+  未知平台回退基类、isinstance 返回 False）；`LegacyBotProxy` 镜像
+  aiocqhttp CQHttp 动态方法面，`bot.api.call_action`/`bot.<method>`
+  经 `platform.raw` capability 转发到 Host 适配器（按 platform_id→
+  meta().name 解析 adapter.bot，无 call_action 则回退同名方法，结果
+  强制 JSON 安全）。**该能力只授予 legacy 插件**：bridge 对新 SDK
+  插件声明 platform.raw 直接拒绝加载，新 SDK 公共 API 无对应面。
+  wechatpadpro/gewechat 社区适配器为 import-only 壳（非 Host 平台）。
 - [ ] 旧版兼容层 P3（长尾，按需）：`persona_manager`（等 personas 能力）、
   `astrbot.api.web` 路由（等 web 能力设计）、`EmbeddingProvider` 等
   类型外观的剩余零散项、`star_handlers_registry` 等注册表内省

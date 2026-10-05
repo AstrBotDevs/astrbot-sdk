@@ -38,6 +38,7 @@ from .event import (
     translate_compat_result,
 )
 from .hooks import HOOK_STAGE_KINDS, invoke_compat_hook
+from .platform_events import build_legacy_event
 from .star import Context as CompatContext
 from .star import Star
 
@@ -489,7 +490,7 @@ def _wrap_tool(
     async def wrapper(call, **kwargs):
         facade = None
         if call.event is not None:
-            facade = AstrMessageEvent(call.event, plugin.context)
+            facade = build_legacy_event(call.event, plugin.context)
         outcome = method(facade, **kwargs)
         if inspect.isasyncgen(outcome):
             # Legacy tools may yield MessageEventResult items; send them
@@ -632,7 +633,7 @@ def _wrap_handler(
     """Wrap one legacy handler into the new invoke contract."""
 
     async def wrapper(event, **kwargs):
-        facade = AstrMessageEvent(event, plugin.context)
+        facade = build_legacy_event(event, plugin.context)
         for custom_filter in custom_filters or []:
             # The global config does not cross the isolation boundary; custom
             # filters receive None for the legacy cfg argument.

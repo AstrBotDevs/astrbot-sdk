@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from ...tools import Tool, ToolParam
-from .event import AstrMessageEvent
+from .platform_events import build_legacy_event
 
 
 @dataclass
@@ -104,7 +104,7 @@ class LegacyFunctionToolAdapter(Tool):
             return result
         event = None
         if getattr(call, "event", None) is not None:
-            event = AstrMessageEvent(call.event, self._context)
+            event = build_legacy_event(call.event, self._context)
         agent_context = SimpleNamespace(event=event, context=self._context)
         wrapper = SimpleNamespace(context=agent_context)
         return await self._legacy_tool.call(wrapper, **kwargs)

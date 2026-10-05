@@ -469,3 +469,94 @@ def test_compat_media_components_accept_asset_ref() -> None:
     segment = to_sdk_segment(Image.fromURL(asset))
     assert isinstance(segment, SDKImage)
     assert segment.source is asset
+
+
+@pytest.mark.asyncio
+async def test_legacy_platform_event_shims() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from astrbot_sdk.compat.v1.api import install
+    from astrbot_sdk.compat.v1.event import AstrMessageEvent
+    from astrbot_sdk.compat.v1.platform_events import (
+        AiocqhttpMessageEvent,
+        WebChatMessageEvent,
+        build_legacy_event,
+    )
+
+    install(host_version="test")
+
+    # The fake source modules must import like the real core ones.
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+        AiocqhttpMessageEvent as ImportedAiocqhttpMessageEvent,
+    )
+
+    assert ImportedAiocqhttpMessageEvent is AiocqhttpMessageEvent
+
+    # isinstance stays honest: the facade class follows the event platform.
+    event = make_event()
+    aiocqhttp_event = build_legacy_event(
+        MessageEvent(
+            id="event-2",
+            umo=UMO("platform-2", MessageType.GROUP, "group-1"),
+            platform_type="aiocqhttp",
+            message_ref=MessageRef("message-2"),
+            message=MessageChain(Plain("moe")),
+            sender=Sender("user-1", "Moon"),
+            timestamp=datetime.now(UTC),
+        ),
+        SimpleNamespace(),
+    )
+    assert isinstance(aiocqhttp_event, AiocqhttpMessageEvent)
+    assert isinstance(aiocqhttp_event, AstrMessageEvent)
+
+    webchat_event = build_legacy_event(event, SimpleNamespace())
+    assert isinstance(webchat_event, WebChatMessageEvent)
+    assert not isinstance(webchat_event, AiocqhttpMessageEvent)
+
+    unknown_event = build_legacy_event(
+        MessageEvent(
+            id="event-3",
+            umo=UMO("platform-3", MessageType.PRIVATE, "user-1"),
+            platform_type="some_community_adapter",
+            message_ref=MessageRef("message-3"),
+            message=MessageChain(Plain("hi")),
+            sender=Sender("user-1", "Moon"),
+            timestamp=datetime.now(UTC),
+        ),
+        SimpleNamespace(),
+    )
+    assert type(unknown_event) is AstrMessageEvent
+
+    # The raw bot escape hatch routes through the platform.raw capability.
+    invoke = AsyncMock(return_value={"result": {"member_count": 1}})
+    context = SimpleNamespace(_ctx=SimpleNamespace(_invoke_capability=invoke))
+    bot_event = build_legacy_event(
+        MessageEvent(
+            id="event-4",
+            umo=UMO("napcat-1", MessageType.GROUP, "group-1"),
+            platform_type="aiocqhttp",
+            message_ref=MessageRef("message-4"),
+            message=MessageChain(Plain("moe")),
+            sender=Sender("user-1", "Moon"),
+            timestamp=datetime.now(UTC),
+        ),
+        context,
+    )
+    result = await bot_event.bot.get_group_member_list(group_id="group-1")
+    assert result == {"result": {"member_count": 1}}
+    invoke.assert_awaited_once_with(
+        "platform.raw",
+        "call_action",
+        {
+            "platform_id": "napcat-1",
+            "platform": "aiocqhttp",
+            "action": "get_group_member_list",
+            "params": {"group_id": "group-1"},
+        },
+    )
+
+    # bot.api.call_action is the same channel with an explicit action name.
+    invoke.reset_mock()
+    await bot_event.bot.api.call_action("set_group_ban", group_id="g", user_id="u")
+    assert invoke.await_args.args[2]["action"] == "set_group_ban"

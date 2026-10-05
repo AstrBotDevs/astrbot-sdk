@@ -15,6 +15,7 @@ from .components import (
     to_sdk_segment,
 )
 from .event import AstrMessageEvent
+from .platform_events import build_legacy_event
 
 # Legacy filter-decorator stage -> new hook HandlerKind.
 HOOK_STAGE_KINDS: dict[str, HandlerKind] = {
@@ -137,7 +138,7 @@ async def invoke_compat_hook(
 
     facade_event: AstrMessageEvent | None = None
     if isinstance(event, MessageEvent):
-        facade_event = AstrMessageEvent(event, context)
+        facade_event = build_legacy_event(event, context)
 
     args: list[Any] = []
     if stage == "llm_request":

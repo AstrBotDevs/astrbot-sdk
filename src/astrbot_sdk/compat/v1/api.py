@@ -191,6 +191,7 @@ def install(host_version: str | None = None) -> None:
         event,
         html,
         loader,
+        platform_events,
         po,
         provider,
         sessions,
@@ -370,6 +371,88 @@ def install(host_version: str | None = None) -> None:
     platform_mod.Group = event.Group
     platform_mod.PlatformStatus = event.PlatformStatus
     platform_mod.MessageSesion = star.MessageSesion
+
+    # Per-platform source modules legacy plugins import for isinstance
+    # checks and raw bot access. Parents up to astrbot.core.platform already
+    # resolve; every level below must be pre-registered because the fake
+    # packages have an empty __path__.
+    platform_sources_mods = {
+        "astrbot.core.platform.sources": {},
+        "astrbot.core.platform.sources.aiocqhttp": {},
+        "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event": {
+            "AiocqhttpMessageEvent": platform_events.AiocqhttpMessageEvent,
+        },
+        "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter": {
+            "AiocqhttpAdapter": platform_events.AiocqhttpAdapter,
+        },
+        "astrbot.core.platform.sources.qqofficial": {},
+        "astrbot.core.platform.sources.qqofficial.qqofficial_message_event": {
+            "QQOfficialMessageEvent": platform_events.QQOfficialMessageEvent,
+        },
+        "astrbot.core.platform.sources.qqofficial.qqofficial_platform_adapter": {
+            "QQOfficialPlatformAdapter": platform_events.QQOfficialPlatformAdapter,
+        },
+        "astrbot.core.platform.sources.qqofficial_webhook": {},
+        "astrbot.core.platform.sources.qqofficial_webhook.qo_webhook_event": {
+            "QQOfficialWebhookMessageEvent": (
+                platform_events.QQOfficialWebhookMessageEvent
+            ),
+        },
+        "astrbot.core.platform.sources.telegram": {},
+        "astrbot.core.platform.sources.telegram.tg_event": {
+            "TelegramPlatformEvent": platform_events.TelegramPlatformEvent,
+        },
+        "astrbot.core.platform.sources.lark": {},
+        "astrbot.core.platform.sources.lark.lark_event": {
+            "LarkMessageEvent": platform_events.LarkMessageEvent,
+        },
+        "astrbot.core.platform.sources.lark.lark_adapter": {
+            "LarkPlatformAdapter": platform_events.LarkPlatformAdapter,
+        },
+        "astrbot.core.platform.sources.discord": {},
+        "astrbot.core.platform.sources.discord.discord_platform_event": {
+            "DiscordPlatformEvent": platform_events.DiscordPlatformEvent,
+        },
+        "astrbot.core.platform.sources.discord.discord_platform_adapter": {
+            "DiscordPlatformAdapter": platform_events.DiscordPlatformAdapter,
+        },
+        "astrbot.core.platform.sources.dingtalk": {},
+        "astrbot.core.platform.sources.dingtalk.dingtalk_event": {
+            "DingtalkMessageEvent": platform_events.DingtalkMessageEvent,
+        },
+        "astrbot.core.platform.sources.slack": {},
+        "astrbot.core.platform.sources.slack.slack_event": {
+            "SlackMessageEvent": platform_events.SlackMessageEvent,
+        },
+        "astrbot.core.platform.sources.webchat": {},
+        "astrbot.core.platform.sources.webchat.webchat_event": {
+            "WebChatMessageEvent": platform_events.WebChatMessageEvent,
+        },
+        "astrbot.core.platform.sources.webchat.webchat_queue_mgr": {
+            "webchat_queue_mgr": platform_events.webchat_queue_mgr,
+        },
+        "astrbot.core.platform.sources.wechatpadpro": {},
+        "astrbot.core.platform.sources.wechatpadpro.wechatpadpro_message_event": {
+            "WeChatPadProMessageEvent": platform_events.WeChatPadProMessageEvent,
+        },
+        "astrbot.core.platform.sources.wechatpadpro.wechatpadpro_adapter": {
+            "WeChatPadProAdapter": platform_events.WeChatPadProAdapter,
+        },
+        "astrbot.core.platform.sources.gewechat": {},
+        "astrbot.core.platform.sources.gewechat.gewechat_event": {
+            "GewechatPlatformEvent": platform_events.GewechatPlatformEvent,
+        },
+        "astrbot.core.platform.sources.gewechat.client": {
+            "SimpleGewechatClient": platform_events.SimpleGewechatClient,
+        },
+    }
+    for sources_name, sources_attrs in platform_sources_mods.items():
+        sources_mod = ModuleType(sources_name)
+        if not sources_attrs:
+            sources_mod.__path__ = []  # mark as package
+        for attr_name, attr_value in sources_attrs.items():
+            setattr(sources_mod, attr_name, attr_value)
+        sys.modules[sources_name] = sources_mod
 
     command_filter_mod = ModuleType("astrbot.core.star.filter.command")
     command_filter_mod.GreedyStr = loader.GreedyStr

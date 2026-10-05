@@ -20,6 +20,7 @@ from typing import Any
 
 from ...services.sessions import SessionFilter as SDKSessionFilter
 from .event import AstrMessageEvent
+from .platform_events import build_legacy_event
 from .star import StarTools
 
 USER_SESSIONS: dict[str, SessionWaiter] = {}  # 存储 SessionWaiter 实例
@@ -130,7 +131,7 @@ class _LegacyFilterAdapter(SDKSessionFilter):
 
     def filter(self, event: Any) -> str:
         """Return the legacy session key for one SDK event."""
-        return self._legacy_filter.filter(AstrMessageEvent(event, self._context))
+        return self._legacy_filter.filter(build_legacy_event(event, self._context))
 
 
 class SessionWaiter:
@@ -212,7 +213,7 @@ class SessionWaiter:
                 except TimeoutError:
                     controller.stop(TimeoutError("等待超时"))
                     return
-                facade = AstrMessageEvent(sdk_event, context)
+                facade = build_legacy_event(sdk_event, context)
                 if self.record_history_chains:
                     controller.history_chains.append(
                         [copy.deepcopy(comp) for comp in facade.get_messages()],
