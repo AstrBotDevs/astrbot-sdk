@@ -92,6 +92,56 @@ def make_event(text: str = "hello") -> MessageEvent:
 
 
 @pytest.mark.asyncio
+async def test_legacy_register_decorator_does_not_override_yaml_metadata(
+    tmp_path: Path,
+) -> None:
+    # Some plugins pass empty strings to the deprecated register decorator
+    # (e.g. an empty version). The in-process loader prioritizes
+    # metadata.yaml, so the handshake must carry the yaml metadata.
+    plugin_root = tmp_path / "legacy_empty_register"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy_empty_register",
+                "desc": "yaml desc",
+                "author": "YamlAuthor",
+                "version": "v1.1.0",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "main.py").write_text(
+        """
+from astrbot.api.star import Context, Star, register
+
+
+@register("legacy_empty_register", "DecoratorAuthor", "", "", "")
+class EmptyRegisterPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+""",
+        encoding="utf-8",
+    )
+
+    client = StdioPluginClient(
+        plugin_root,
+        python_executable=Path(sys.executable),
+        capability_handler=None,
+        legacy=True,
+    )
+    try:
+        handshake = await client.start(
+            granted_capabilities=CapabilitySet.from_ids("storage.kv"),
+        )
+        assert handshake.name == "legacy_empty_register"
+        assert handshake.version == "v1.1.0"
+        assert handshake.plugin_id == "yamlauthor/legacy_empty_register"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_legacy_plugin_runs_unmodified(tmp_path: Path) -> None:
     plugin_root = tmp_path / "legacy_hello"
     write_legacy_plugin(plugin_root)

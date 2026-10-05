@@ -104,7 +104,7 @@ def write_legacy_plugin(plugin_root: Path) -> None:
         yaml.safe_dump(
             {
                 "name": "wrong_name",
-                "desc": "overridden by @register",
+                "desc": "yaml desc wins over @register",
                 "author": "AstrBot",
                 "version": "0.0.1",
             },
@@ -241,9 +241,10 @@ async def test_legacy_surface(tmp_path: Path) -> None:
                 "llm.tool.register",
             ),
         )
-        # @register metadata overrides metadata.yaml.
-        assert handshake.name == "legacy_surface"
-        assert handshake.version == "2.0.0"
+        # metadata.yaml takes precedence over the @register decorator,
+        # matching the in-process loader.
+        assert handshake.name == "wrong_name"
+        assert handshake.version == "0.0.1"
 
         # FunctionTool registered during initialize() with JSON-schema params.
         assert len(registered_tools) == 1
@@ -285,9 +286,9 @@ async def test_legacy_surface(tmp_path: Path) -> None:
         # StarTools.get_data_dir lands on the AstrBot plugin_data path.
         results = [r async for r in client.invoke("datadir", make_event("datadir"))]
         assert [r.message.text for r in results if r is not None] == [
-            "dir=legacy_surface",
+            "dir=wrong_name",
         ]
-        assert (tmp_path / "plugin_data" / "legacy_surface").is_dir()
+        assert (tmp_path / "plugin_data" / "wrong_name").is_dir()
 
         # Conversation manager facade end to end.
         results = [r async for r in client.invoke("conv", make_event("conv"))]

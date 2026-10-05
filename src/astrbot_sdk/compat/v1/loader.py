@@ -744,20 +744,19 @@ def load_legacy_plugin(
 
     star_class = _find_star_class(module, namespace)
     declared = getattr(star_class, "__astrbot_register__", None)
-    if declared:
-        previous_name = metadata.name
+    if declared and not metadata.desc:
+        # The in-process loader prioritizes metadata.yaml over the deprecated
+        # register decorator, so decorator values only fill fields the yaml
+        # file leaves empty. Some plugins pass empty strings to the decorator
+        # (e.g. an empty version), which must not clobber the yaml metadata.
         metadata = LegacyMetadata(
-            plugin_id=f"{str(declared['author']).lower()}/{str(declared['name']).lower()}",
-            name=str(declared["name"]),
-            version=str(declared["version"]),
-            author=str(declared["author"]),
-            desc=str(declared["desc"]),
+            plugin_id=metadata.plugin_id,
+            name=metadata.name,
+            version=metadata.version,
+            author=metadata.author,
+            desc=str(declared.get("desc") or ""),
             views=metadata.views,
         )
-        if metadata.name != previous_name:
-            # Keep the data directory aligned with the declared plugin name.
-            ctx.data_dir = ctx.data_dir.parent / metadata.name
-            ctx.data_dir.mkdir(parents=True, exist_ok=True)
     # Old loaders inject the plugin name as a class attribute before
     # instantiation; plugins rely on self.name during __init__.
     star_class.name = metadata.name
