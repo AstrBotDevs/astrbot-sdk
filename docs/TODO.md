@@ -91,6 +91,27 @@
   23 个但均为插件自管出站连接（register_web_api 本身不支持 ws
   路由），非兼容缺口。Blueprint 9 个，属插件自建 Quart app。结论：
   web/views 管线实现与真实语料吻合，无新增兼容缺口。
+- [x] **插件语料真实导入扫（2026-10-05，2396 个插件根，core venv
+  实测加载）**：经 `load_legacy_plugin` 全量真实导入（非静态扫描），
+  两遍制（批量 + 可疑类单进程复跑消除批处理假象）。结果：
+  **1544 ok（64.4%）**、382 设计排除（15.9%，astrbot.core 内部/
+  register_platform_adapter 等，响报）、261 缺三方依赖（10.9%，
+  per-plugin venv 范畴）、81 compat 长尾（3.4%）、70 error（2.9%）、
+  30 invalid_def（1.3%）、26 无 metadata。长尾明细（均为 1-5 次零散
+  项，后续按需收口）：legacy 类型外观（`Group`×9、`ContentPart`/
+  `ThinkPart`/`AssistantMessageSegment`/`bind_checkpoint_messages`、
+  `RerankProvider`×4、`StarMetadata`/`command_management`/`star_map`、
+  `Location`/`Unknown`/`ComponentTypes`/`ComponentType`/`Dice`、
+  `PlatformStatus`/`MessageSesion`/`Platform`、`VERSION`、
+  `EventResultType`/`CommandResult`）；facade 属性缺口
+  （`Context.platform_manager`、`CompatConfig` 任意键访问、
+  `Image.to_dict`、`html_render`、`api.web.PluginRequest` 导出、
+  `get_astrbot_root`）。error 桶大头：10 个模块级 StarTools 调用
+  （loader 在 import 后才绑定，可将绑定提前）、4 个
+  register_platform_adapter 属设计排除误分类，其余为坏插件
+  （硬编码 /AstrBot 路径、缺配置键、import 期要 API key、语法错误）。
+  invalid_def 中 ~8 个为 legacy tool 参数缺类型标注/docstring 类型
+  （当前偏严，可放宽默认 str）。
 - [x] **旧版兼容层 P2**（已完成）：Provider 代理（`astrbot.api.provider`、
   `get_using_provider`/`text_chat`/`llm_generate`/`tool_loop_agent`）、
   hooks 兼容（`on_llm_request` 等 14 个装饰器，旧签名原地改写经追踪
