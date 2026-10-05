@@ -202,9 +202,17 @@
   Runner 现在把 fd 1 重定向到 stderr、协议帧走 dup 后的私有 fd）。
   二轮复扫（同日，1879 ok / 505 fail，78.8%）：platform.raw 落地后
   `astrbot.core.platform.sources` 一桶基本消除；metadata.yaml 缺失
-  容忍 + 握手 ctx 解析修复又吃 20+。剩余失败分桶（设计排除为主）：
+  容忍 + 握手 ctx 解析修复又吃 20+。三轮复扫（同日，1896 ok /
+  488 fail，79.5%）：config.write 能力落地（CompatConfig.save_config
+  走 RPC 全量快照，Host 侧 clear+update 后 save_config_async 提交，
+  仅 legacy 可声明），21 个 save_config 插件 17 个恢复；其余 4 个
+  属于其他已知桶。新发现缺口：130 个插件同步迭代
+  `Context.get_all_providers()`（compat 目前是 async RPC，迭代
+  coroutine 直接 TypeError；smart_imagechat_hub 在 initialize 期
+  触发）——候选方案：握手时下发热 provider 快照，compat 同步返回
+  预绑定 facade。剩余失败分桶（设计排除为主）：
   `astrbot.core` 直接导入 74+52+6、`Context.get_config()` 62、
-  `config.save_config()` 21、`register_platform_adapter` 19+9、
+  `register_platform_adapter` 19+9、
   `activate_llm_tool`/`get_llm_tool_manager` 7+6、`persona_manager` 5
   （等 personas 能力）、`pipeline` 9、`star.config`、
   `MediaResolver`/`compress_image`/`convert_audio`/`RerankProvider`
