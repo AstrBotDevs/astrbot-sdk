@@ -79,6 +79,18 @@
   就位；PluginPageService 对 bridge 插件的 discover/serve 全部
   改走管线，HTML/CSS 重写与 iframe 沙箱行为与进程内插件一致，
   bridge 插件的磁盘直读路径被显式封死。缓存作为后续优化项保留。
+- [x] **插件语料复扫（2026-10-05，2384 个插件）**：views 已从极少数
+  走向实用——34 个插件声明 views/pages（0914 快照仅 5 个），31 个实际
+  附带页面资产（33 个页面），字段只用 name/title/description/
+  entry_file（均为默认 index.html），当前实现全覆盖；i18n 走
+  `.astrbot-plugin/i18n/*.json` 目录发现（10+ 插件），与元数据无关。
+  Web API 呈爆发式增长：269 个插件调用 register_web_api（0914 仅
+  25 个），api.web facade 229 个、quart 方言 146 个；handler 中
+  `request.files` 59 个、form 36 个、流式 29 个——quart 回放原生
+  解析 multipart、facade 支持 UploadFile，均已覆盖。websocket 命中
+  23 个但均为插件自管出站连接（register_web_api 本身不支持 ws
+  路由），非兼容缺口。Blueprint 9 个，属插件自建 Quart app。结论：
+  web/views 管线实现与真实语料吻合，无新增兼容缺口。
 - [x] **旧版兼容层 P2**（已完成）：Provider 代理（`astrbot.api.provider`、
   `get_using_provider`/`text_chat`/`llm_generate`/`tool_loop_agent`）、
   hooks 兼容（`on_llm_request` 等 14 个装饰器，旧签名原地改写经追踪
