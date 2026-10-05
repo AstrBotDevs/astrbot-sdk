@@ -727,7 +727,7 @@ def load_legacy_plugin(
     from .star import CompatConfig
 
     if config is not None and not isinstance(config, CompatConfig):
-        config = CompatConfig(config)
+        config = CompatConfig(config, ctx=ctx)
     context = CompatContext(ctx, config=config)
     from .star import StarTools
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Mapping
 from typing import Any
 
 from .components import MessageChain
@@ -459,15 +461,22 @@ def _star_metadata_shell(info: Any) -> Any:
 
 
 class CompatConfig(dict):
-    """Plugin config facade: a dict that rejects file persistence loudly.
+    """Plugin config facade: a dict whose save_config persists via the Host.
 
     The isolated Runner holds a snapshot of the plugin config; writes back
-    to data/config need the Host, so save_config is unsupported here.
+    to data/config are forwarded to the Host through the ``config.write``
+    capability, which owns the real AstrBotConfig (and its file).
 
     Mirrors AstrBotConfig's attribute access: ``config.key`` reads a
     top-level item (missing keys yield None), and attribute assignment
     writes into the in-memory dict without persisting.
     """
+
+    def __init__(self, *args: Any, ctx: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Bypass __setattr__: the context reference must not become a
+        # config item inside the dict snapshot.
+        object.__setattr__(self, "_ctx", ctx)
 
     def __getattr__(self, item: str) -> Any:
         try:
@@ -484,11 +493,75 @@ class CompatConfig(dict):
         except KeyError:
             raise AttributeError(key) from None
 
-    def save_config(self, *args: Any, **kwargs: Any) -> None:
-        """Reject persistence; config files live on the Host."""
-        raise IsolationUnsupportedError(
-            "config.save_config() is unavailable in isolated legacy mode"
+    def save_config(
+        self, replace_config: dict | None = None, *, indent: int = 2
+    ) -> None:
+        """Persist the config through the Host, fire-and-forget.
+
+        The legacy signature is synchronous, but the Host round-trip is
+        async; plugins call this from async handlers, so the write is
+        scheduled on the running loop and failures are logged. Use
+        save_config_async to await the write.
+
+        Args:
+            replace_config: Values merged into the config before saving.
+            indent: JSON indent hint forwarded to the Host.
+        """
+        ctx = object.__getattribute__(self, "_ctx")
+        if ctx is None:
+            raise IsolationUnsupportedError(
+                "config.save_config() has no Host channel in this context"
+            )
+        if replace_config:
+            self.update(replace_config)
+        task = asyncio.get_running_loop().create_task(
+            ctx._invoke_capability(
+                "config.write",
+                "save",
+                {"config": dict(self), "indent": indent},
+            ),
         )
+        task.add_done_callback(self._log_save_failure)
+
+    async def save_config_async(
+        self, replace_config: dict | None = None, *, indent: int = 2
+    ) -> bool:
+        """Persist the config through the Host and await the result.
+
+        Args:
+            replace_config: Values merged into the config before saving.
+            indent: JSON indent hint forwarded to the Host.
+
+        Returns:
+            Whether the snapshot was committed by the Host.
+        """
+        ctx = object.__getattribute__(self, "_ctx")
+        if ctx is None:
+            raise IsolationUnsupportedError(
+                "config.save_config_async() has no Host channel in this context"
+            )
+        if replace_config:
+            self.update(replace_config)
+        result = await ctx._invoke_capability(
+            "config.write",
+            "save",
+            {"config": dict(self), "indent": indent},
+        )
+        if isinstance(result, Mapping):
+            return bool(result.get("committed", True))
+        return True
+
+    @staticmethod
+    def _log_save_failure(task: asyncio.Task) -> None:
+        """Surface fire-and-forget save failures to the plugin log."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger("astrbot.compat").error(
+                "config.save_config() failed: %s",
+                exc,
+            )
 
 
 class StarTools:

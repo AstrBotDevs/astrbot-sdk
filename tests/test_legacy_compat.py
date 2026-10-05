@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -453,6 +454,61 @@ def test_compat_config_attribute_access() -> None:
     assert "new_key" not in config
     with pytest.raises(AttributeError):
         del config.new_key
+
+
+class _RecordingCtx:
+    """Minimal context double capturing capability invocations."""
+
+    def __init__(self, response=None):
+        self.calls: list[tuple[str, str, dict]] = []
+        self._response = response if response is not None else {"committed": True}
+
+    async def _invoke_capability(self, capability_id, operation, payload):
+        self.calls.append((capability_id, operation, payload))
+        return self._response
+
+
+async def test_compat_config_save_config_forwards_snapshot() -> None:
+    # Fire-and-forget save: merges replace_config, then forwards the whole
+    # snapshot to the Host via config.write on the running loop.
+    from astrbot_sdk.compat.v1.star import CompatConfig
+
+    ctx = _RecordingCtx()
+    config = CompatConfig({"push_time": "08:00"}, ctx=ctx)
+    config.save_config({"push_time": "09:30"})
+
+    assert config["push_time"] == "09:30"
+    # Let the scheduled task run.
+    await asyncio.sleep(0)
+    assert len(ctx.calls) == 1
+    capability_id, operation, payload = ctx.calls[0]
+    assert capability_id == "config.write"
+    assert operation == "save"
+    assert payload["config"] == {"push_time": "09:30"}
+    assert payload["indent"] == 2
+
+
+async def test_compat_config_save_config_async_awaits_commit() -> None:
+    from astrbot_sdk.compat.v1.star import CompatConfig
+
+    ctx = _RecordingCtx(response={"committed": False})
+    config = CompatConfig({"a": 1}, ctx=ctx)
+    assert await config.save_config_async() is False
+    assert ctx.calls[0][2]["config"] == {"a": 1}
+
+    ctx_ok = _RecordingCtx(response={"committed": True})
+    config_ok = CompatConfig({"a": 1}, ctx=ctx_ok)
+    assert await config_ok.save_config_async({"b": 2}) is True
+    assert ctx_ok.calls[0][2]["config"] == {"a": 1, "b": 2}
+
+
+def test_compat_config_save_config_without_ctx_raises() -> None:
+    from astrbot_sdk.compat.v1.errors import IsolationUnsupportedError
+    from astrbot_sdk.compat.v1.star import CompatConfig
+
+    config = CompatConfig({"a": 1})
+    with pytest.raises(IsolationUnsupportedError):
+        config.save_config()
 
 
 def test_compat_media_components_accept_asset_ref() -> None:
