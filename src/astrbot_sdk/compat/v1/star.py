@@ -345,6 +345,14 @@ class Context:
             "deactivate_llm_tool is unavailable in isolated legacy mode"
         )
 
+    @property
+    def registered_web_apis(self) -> list[tuple[str, Any, list[str], str]]:
+        """Read-only view of this plugin's routes, in the core tuple shape."""
+        return [
+            (entry.route, entry.handler, entry.methods, entry.desc)
+            for entry in self._web_routes
+        ]
+
     def register_web_api(
         self,
         route: str,

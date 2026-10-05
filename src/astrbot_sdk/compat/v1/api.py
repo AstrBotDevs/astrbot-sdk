@@ -438,7 +438,36 @@ def install() -> None:
 
         return os.environ.get("ASTRBOT_DATA_PATH", ".")
 
+    def _data_subdir(name: str):
+        # Mirror astrbot.core.utils.astrbot_path's data-subdirectory helpers;
+        # they are plain path derivations, safe to compute inside the Runner.
+        def helper() -> str:
+            import os
+
+            return os.path.realpath(os.path.join(_data_path(), name))
+
+        return helper
+
     astrbot_path_mod.get_astrbot_data_path = _data_path
+    astrbot_path_mod.get_astrbot_config_path = _data_subdir("config")
+    astrbot_path_mod.get_astrbot_plugin_path = _data_subdir("plugins")
+    astrbot_path_mod.get_astrbot_plugin_data_path = _data_subdir("plugin_data")
+    astrbot_path_mod.get_astrbot_t2i_templates_path = _data_subdir("t2i_templates")
+    astrbot_path_mod.get_astrbot_webchat_path = _data_subdir("webchat")
+    astrbot_path_mod.get_astrbot_temp_path = _data_subdir("temp")
+    astrbot_path_mod.get_astrbot_skills_path = _data_subdir("skills")
+    astrbot_path_mod.get_astrbot_workspaces_path = _data_subdir("workspaces")
+    astrbot_path_mod.get_astrbot_site_packages_path = _data_subdir("site-packages")
+    astrbot_path_mod.get_astrbot_knowledge_base_path = _data_subdir("knowledge_base")
+    astrbot_path_mod.get_astrbot_backups_path = _data_subdir("backups")
+
+    def _system_tmp_path() -> str:
+        import os
+        import tempfile
+
+        return os.path.realpath(os.path.join(tempfile.gettempdir(), ".astrbot"))
+
+    astrbot_path_mod.get_astrbot_system_tmp_path = _system_tmp_path
 
     provider_mod = ModuleType("astrbot.api.provider")
     provider_mod.LLMResponse = provider.LLMResponse
