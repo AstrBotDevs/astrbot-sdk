@@ -149,11 +149,14 @@ def _decode_dataclass(cls: type, payload: Any) -> Any:
         raise InvalidRequest(f"invalid {cls.__name__} payload") from exc
 
 
-def encode_value(value: Any) -> JSONValue:
+def encode_value(value: Any, *, allow_unknown: bool = False) -> JSONValue:
     """Encode a supported SDK or JSON value.
 
     Args:
         value: Value passed through the protocol.
+        allow_unknown: Whether inbound UnknownSegment instances inside message
+            chains may be encoded. Enable only for pass-through state (hook
+            snapshots and write ops); fresh handler results stay strict.
 
     Returns:
         JSON-compatible representation.
@@ -196,23 +199,26 @@ def encode_value(value: Any) -> JSONValue:
         return {
             "$type": type(value).__name__,
             "value": {
-                field.name: encode_value(getattr(value, field.name))
+                field.name: encode_value(
+                    getattr(value, field.name),
+                    allow_unknown=allow_unknown,
+                )
                 for field in fields(value)
             },
         }
     if isinstance(value, MessageChain):
         return {
             "$type": "MessageChain",
-            "value": encode_message_chain(value),
+            "value": encode_message_chain(value, allow_unknown=allow_unknown),
         }
     if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
-        return [encode_value(item) for item in value]
+        return [encode_value(item, allow_unknown=allow_unknown) for item in value]
     if isinstance(value, Mapping):
         encoded: dict[str, JSONValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise InvalidRequest("protocol mapping keys must be strings")
-            encoded[key] = encode_value(item)
+            encoded[key] = encode_value(item, allow_unknown=allow_unknown)
         return encoded
     raise InvalidRequest(f"unsupported protocol value: {type(value)!r}")
 

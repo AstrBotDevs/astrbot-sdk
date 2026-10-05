@@ -507,7 +507,7 @@ class StdioPluginClient:
                 "handler_id": handler_id,
                 "event": encode_value(event),
                 "stage": stage,
-                "payload": encode_value(dict(payload)),
+                "payload": encode_value(dict(payload), allow_unknown=True),
             },
         )
         return decode_value(result)

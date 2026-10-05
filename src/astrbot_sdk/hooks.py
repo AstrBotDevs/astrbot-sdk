@@ -31,7 +31,9 @@ def _encode_item(value: Any) -> Any:
     from .message_components import MessageSegment
 
     if isinstance(value, MessageSegment):
-        return encode_message_chain(MessageChain(value))[0]
+        # Hook chains are pass-through state; inbound unknown segments must
+        # round-trip through write ops unchanged.
+        return encode_message_chain(MessageChain(value), allow_unknown=True)[0]
     return encode_value(value)
 
 
@@ -126,10 +128,16 @@ class HookDTO:
             )
         values = object.__getattribute__(self, "_values")
         ops = object.__getattribute__(self, "_ops")
-        if name in self._list_fields and not isinstance(value, TrackedList):
-            value = TrackedList(name, value, ops)
+        if name in self._list_fields:
+            if not isinstance(value, TrackedList):
+                value = TrackedList(name, value, ops)
+            # List fields may hold message segments, which only the chain
+            # codec can encode.
+            encoded = [_encode_item(item) for item in value]
+        else:
+            encoded = encode_value(value)
         values[name] = value
-        ops.append({"field": name, "op": "set", "value": encode_value(value)})
+        ops.append({"field": name, "op": "set", "value": encoded})
 
     def _init_lists(self) -> None:
         values = object.__getattribute__(self, "_values")

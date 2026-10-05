@@ -201,6 +201,13 @@
   （tool 执行器的前置检查、只跳过单次发送不终止事件的通道）。
   当前 hook 只支持写操作修改，与旧版语义一致。
 
+- [ ] **本地媒体组件的 host→plugin 保真**：`to_sdk_chain` 遇到本地文件
+  媒体（无 http URL 的 Image/Record/Video/File）目前降级为惰性
+  UnknownSegment，SDK 插件在 hook/事件里看不到真实图片。正解是 bridge
+  把本地文件登记进 host AssetStore、向插件发 AssetRef（插件可经
+  assets.download 取回）。顺带解决整链 set 写回时未知段无法重建 core
+  组件的问题（当前 Poke/Json/Share 有特判，其余 loud fail）。
+
 ## 兼容性
 
 - [ ] **Python 3.10 降级**：SDK 目前使用 PEP 695 语法（`class Plugin[ConfigT]`、

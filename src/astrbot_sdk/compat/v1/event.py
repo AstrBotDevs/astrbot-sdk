@@ -8,13 +8,17 @@ from typing import Any
 from ...events import MessageEvent, SenderRole
 from ...results import Propagation
 from .components import (
-    EventResultType,
+    EventResultType as EventResultType,
+)
+from .components import (
     Image,
     MessageChain,
     MessageEventResult,
     Plain,
-    ResultContentType,
     from_sdk_segment,
+)
+from .components import (
+    ResultContentType as ResultContentType,
 )
 
 # Marker attribute where compat filter decorators accumulate their specs.
