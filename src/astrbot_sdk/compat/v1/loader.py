@@ -51,6 +51,7 @@ class LegacyMetadata:
     author: str
     desc: str
     schema_version: int = 1
+    views: tuple = ()
 
 
 class CompatLoadedPlugin:
@@ -61,10 +62,12 @@ class CompatLoadedPlugin:
         metadata: LegacyMetadata,
         instance: Star,
         registrations: tuple[HandlerRegistration, ...],
+        plugin_root: Path,
     ) -> None:
         self.metadata = metadata
         self.instance = instance
         self.registrations = registrations
+        self.plugin_root = plugin_root
         self.sdk_ctx = instance.context._inner
         self._by_id = {r.id: r for r in registrations}
         self._started = False
@@ -171,6 +174,45 @@ class CompatLoadedPlugin:
         async for item in invoke_web_route(self.instance, entry, request):
             yield item
 
+    async def invoke_views(
+        self,
+        operation: str,
+        page: str | None = None,
+        path: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Serve the views manifest or stream one view file's content."""
+        from ...errors import InvalidRequest, NotFound
+        from ...views import load_i18n, read_view_file, scan_views
+
+        if operation == "manifest":
+            manifest = [
+                {
+                    "name": page_entry.name,
+                    "files": [
+                        {"path": file.path, "size": file.size}
+                        for file in page_entry.files
+                    ],
+                }
+                for page_entry in scan_views(self.plugin_root)
+            ]
+            yield {
+                "info": {
+                    "pages": manifest,
+                    "i18n": load_i18n(self.plugin_root),
+                    "content_type": "application/json",
+                },
+            }
+            return
+        if operation == "read":
+            if not page or not path:
+                raise InvalidRequest("views.read requires page and path")
+            info, chunks = await read_view_file(self.plugin_root, page, path)
+            yield {"info": info}
+            async for chunk in chunks:
+                yield {"chunk": chunk}
+            return
+        raise NotFound(f"unknown views operation: {operation}")
+
 
 def _load_legacy_metadata(plugin_root: Path) -> LegacyMetadata:
     metadata_path = plugin_root / "metadata.yaml"
@@ -179,12 +221,16 @@ def _load_legacy_metadata(plugin_root: Path) -> LegacyMetadata:
     data = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
     name = str(data.get("name") or plugin_root.name)
     author = str(data.get("author") or "unknown")
+    raw_views = data.get("views") if isinstance(data.get("views"), list) else None
+    if raw_views is None and isinstance(data.get("pages"), list):
+        raw_views = data.get("pages")
     return LegacyMetadata(
         plugin_id=f"{author.lower()}/{name.lower()}",
         name=name,
         version=str(data.get("version") or "0.0.0"),
         author=author,
         desc=str(data.get("desc") or ""),
+        views=tuple(raw_views or ()),
     )
 
 
@@ -676,6 +722,7 @@ def load_legacy_plugin(
             version=str(declared["version"]),
             author=str(declared["author"]),
             desc=str(declared["desc"]),
+            views=metadata.views,
         )
         if metadata.name != previous_name:
             # Keep the data directory aligned with the declared plugin name.
@@ -744,4 +791,5 @@ def load_legacy_plugin(
         metadata=metadata,
         instance=instance,
         registrations=tuple(registrations),
+        plugin_root=root,
     )

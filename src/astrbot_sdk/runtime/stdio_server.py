@@ -242,7 +242,7 @@ class StdioPluginServer:
                         acknowledgements: asyncio.Queue[int] = asyncio.Queue()
                         task = asyncio.create_task(
                             self._run_web_invocation(frame, acknowledgements)
-                            if frame.params.get("web")
+                            if frame.params.get("web") or frame.params.get("views")
                             else self._run_invocation(frame, acknowledgements)
                         )
                         self._invocations[frame.id] = (task, acknowledgements)
@@ -557,13 +557,27 @@ class StdioPluginServer:
         try:
             if self.loaded_plugin is None:
                 raise InvalidRequest("Runner is not initialized")
-            from ..web import WebRequestInfo
+            if frame.params.get("views") is not None:
+                views_params = frame.params["views"]
+                if not isinstance(views_params, Mapping):
+                    raise InvalidRequest("views params must be an object")
+                operation = str(views_params.get("operation") or "")
+                page = views_params.get("page")
+                path = views_params.get("path")
+                stream = self.loaded_plugin.invoke_views(
+                    operation,
+                    str(page) if page is not None else None,
+                    str(path) if path is not None else None,
+                )
+            else:
+                from ..web import WebRequestInfo
 
-            request = decode_value(frame.params.get("request"))
-            if not isinstance(request, WebRequestInfo):
-                raise InvalidRequest("web request must be a WebRequestInfo")
+                request = decode_value(frame.params.get("request"))
+                if not isinstance(request, WebRequestInfo):
+                    raise InvalidRequest("web request must be a WebRequestInfo")
+                stream = self.loaded_plugin.invoke_web(request)
             sequence = 0
-            async for item in self.loaded_plugin.invoke_web(request):
+            async for item in stream:
                 sequence += 1
                 await self._send(
                     YieldFrame(

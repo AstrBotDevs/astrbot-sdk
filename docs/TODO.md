@@ -71,9 +71,14 @@
   FileResponse/StreamingResponse 亦支持。palworld 验收通过
   （33/33）。多值 query、multipart 表单、UploadFile 走
   `astrbot.api.web` facade。
-- [ ] **views over RPC（下一步）**：`views.manifest` + `views.read`
-  纯代理（无缓存 v1），PluginPageService 读路径换 RPC；
-  `views`/`pages` 元数据透传 StarMetadata；缓存作为后续优化。
+- [x] **views over RPC（已完成 v1 纯代理）**：Runner 的
+  `invoke_views` 提供 `manifest`（页面清单 + i18n JSON 内联）与
+  `read`（文件分 chunk 流式 + 穿越防护，双保险在 Runner 与
+  serving 层各做一次）。bridge 启动时拉一次 manifest 缓存，
+  `StarMetadata.views`（yaml 的 views/pages 声明）与 i18n 全部
+  就位；PluginPageService 对 bridge 插件的 discover/serve 全部
+  改走管线，HTML/CSS 重写与 iframe 沙箱行为与进程内插件一致，
+  bridge 插件的磁盘直读路径被显式封死。缓存作为后续优化项保留。
 - [x] **旧版兼容层 P2**（已完成）：Provider 代理（`astrbot.api.provider`、
   `get_using_provider`/`text_chat`/`llm_generate`/`tool_loop_agent`）、
   hooks 兼容（`on_llm_request` 等 14 个装饰器，旧签名原地改写经追踪

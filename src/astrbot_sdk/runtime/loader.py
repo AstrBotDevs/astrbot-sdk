@@ -68,12 +68,16 @@ def _load_metadata_for_legacy(plugin_root: Path) -> PluginMetadata:
     )
     name = str(data.get("name") or plugin_root.name)
     author = str(data.get("author") or "unknown")
+    raw_views = data.get("views") if isinstance(data.get("views"), list) else None
+    if raw_views is None and isinstance(data.get("pages"), list):
+        raw_views = data.get("pages")
     return PluginMetadata(
         schema_version=1,
         name=name,
         author=author,
         version=str(data.get("version") or "0.0.0"),
         desc=str(data.get("desc") or ""),
+        pages=tuple(raw_views or ()),
         runtime=RuntimeMetadata(
             api=PluginAPIFamily.LEGACY,
             entrypoint="main",
@@ -213,6 +217,7 @@ class LoadedPlugin:
     metadata: PluginMetadata
     instance: Plugin[Any]
     registrations: tuple[HandlerRegistration, ...]
+    plugin_root: Path = Path(".")
     _registrations_by_id: Mapping[str, HandlerRegistration] = field(
         init=False,
         repr=False,
@@ -259,6 +264,44 @@ class LoadedPlugin:
         yield {"info": info}
         async for chunk in chunks:
             yield {"chunk": chunk}
+
+    async def invoke_views(
+        self,
+        operation: str,
+        page: str | None = None,
+        path: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Serve view manifest or stream one view file's content."""
+        from ..views import load_i18n, read_view_file, scan_views
+
+        plugin_root = self.plugin_root
+        if operation == "manifest":
+            manifest = [
+                {
+                    "name": page.name,
+                    "files": [
+                        {"path": file.path, "size": file.size} for file in page.files
+                    ],
+                }
+                for page in scan_views(plugin_root)
+            ]
+            yield {
+                "info": {
+                    "pages": manifest,
+                    "i18n": load_i18n(plugin_root),
+                    "content_type": "application/json",
+                },
+            }
+            return
+        if operation == "read":
+            if not page or not path:
+                raise InvalidRequest("views.read requires page and path")
+            info, chunks = await read_view_file(plugin_root, page, path)
+            yield {"info": info}
+            async for chunk in chunks:
+                yield {"chunk": chunk}
+            return
+        raise NotFound(f"unknown views operation: {operation}")
 
     async def _invoke_lifecycle(
         self,
@@ -577,4 +620,5 @@ def load_plugin(
         metadata=metadata,
         instance=instance,
         registrations=tuple(enabled),
+        plugin_root=root,
     )

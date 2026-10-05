@@ -346,9 +346,21 @@ class StdioPluginClient:
         then body chunks (``{"chunk": bytes}``); each consumed item sends
         the acknowledgement that resumes the remote stream (backpressure).
         """
+        async for item in self._invoke_stream(
+            {
+                "web": True,
+                "request": encode_value(request),
+            },
+        ):
+            yield item
+
+    async def _invoke_stream(
+        self,
+        params: Mapping[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run one streaming invocation and yield decoded items."""
         if self._process is None or self._process.returncode is not None:
             raise HostUnavailable("stdio plugin Runner is not running")
-
         invocation_id = f"host-invoke:{uuid.uuid4().hex}"
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
         self._streams[invocation_id] = queue
@@ -359,10 +371,7 @@ class StdioPluginClient:
                 RequestFrame(
                     id=invocation_id,
                     method="invoke",
-                    params={
-                        "web": True,
-                        "request": encode_value(request),
-                    },
+                    params=dict(params),
                 )
             )
             while True:
@@ -399,6 +408,25 @@ class StdioPluginClient:
             ):
                 with contextlib.suppress(HostUnavailable):
                     await self._send(CancelFrame(id=invocation_id))
+
+    async def invoke_views(
+        self,
+        operation: str,
+        page: str | None = None,
+        path: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Fetch the views manifest or stream one view file's content."""
+        params: dict[str, Any] = {"operation": operation}
+        if page is not None:
+            params["page"] = page
+        if path is not None:
+            params["path"] = path
+        async for item in self._invoke_stream(
+            {
+                "views": params,
+            },
+        ):
+            yield item
 
     async def invoke_tool(
         self,
