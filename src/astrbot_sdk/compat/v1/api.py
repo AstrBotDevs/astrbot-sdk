@@ -141,7 +141,18 @@ def install() -> None:
     if _installed:
         return
 
-    from . import components, event, html, loader, po, provider, star, tools, web
+    from . import (
+        components,
+        event,
+        html,
+        loader,
+        po,
+        provider,
+        sessions,
+        star,
+        tools,
+        web,
+    )
 
     astrbot_mod = ModuleType("astrbot")
     astrbot_mod.__path__ = []
@@ -365,6 +376,15 @@ def install() -> None:
     message_session_mod = ModuleType("astrbot.core.platform.message_session")
     message_session_mod.MessageSesion = star.MessageSesion
     message_session_mod.MessageSession = star.MessageSesion
+
+    session_waiter_mod = ModuleType("astrbot.core.utils.session_waiter")
+    session_waiter_mod.SessionController = sessions.SessionController
+    session_waiter_mod.SessionFilter = sessions.SessionFilter
+    session_waiter_mod.DefaultSessionFilter = sessions.DefaultSessionFilter
+    session_waiter_mod.SessionWaiter = sessions.SessionWaiter
+    session_waiter_mod.session_waiter = sessions.session_waiter
+    session_waiter_mod.USER_SESSIONS = sessions.USER_SESSIONS
+    session_waiter_mod.FILTERS = sessions.FILTERS
 
     agent_message_mod = ModuleType("astrbot.core.agent.message")
     agent_message_mod.Message = _AgentMessage
@@ -655,6 +675,7 @@ def install() -> None:
     sys.modules["astrbot.core.config.astrbot_config"] = astrbot_config_mod
     sys.modules["astrbot.core.utils"] = _namespace_package("astrbot.core.utils")
     sys.modules["astrbot.core.utils.astrbot_path"] = astrbot_path_mod
+    sys.modules["astrbot.core.utils.session_waiter"] = session_waiter_mod
 
     # Loudly block the real Host internals; the Runner shares the core venv,
     # so astrbot.core would import successfully without this.

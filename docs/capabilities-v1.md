@@ -90,6 +90,7 @@ Capability 是用户授权和 Host 鉴权的单位，不与 Python 方法一一�
 | --- | --- |
 | `message.send` | 主动向一个 `UMO` 发送消息或 reaction；包括定时、后台和跨事件发送 |
 | `message.receive` | 注册 `on.message` handler，接收未明确调用插件的普通平台消息 |
+| `message.wait` | 认领一个会话的后续消息并拦截管线；多轮问答/向导的线性等待 |
 | `message.observe` | 只读观察消息发送 Pipeline，例如发送完成事件 |
 | `message.modify` | 在发送前读取、修改或阻止消息结果 |
 
@@ -263,6 +264,29 @@ class MessageEvent:
 `on.message` 产生的 filter spec 必须可序列化。任意 Python predicate 不能传给 Host。
 
 消息 handler 收到的 `MessageEvent`、回复 Result 和消息组件不放在 `ctx` 中。它们属于事件与结果类型。
+
+多轮问答通过 `message.wait` 能力的线性会话等待完成：
+
+```python
+class SessionService:
+    def wait(
+        self,
+        event: MessageEvent | None = None,
+        *,
+        filter: SessionFilter | None = None,
+        timeout: float = 60.0,
+    ) -> SessionWait: ...
+
+class SessionWait:
+    async def next(self, timeout: float | None = None) -> MessageEvent: ...
+    async def ask(
+        self,
+        content: MessageLike,
+        timeout: float | None = None,
+    ) -> MessageEvent: ...
+```
+
+`SessionFilter` 是代码形态的会话键映射，在 Runner 侧求值；内置 `DefaultSessionFilter`（按 UMO）与 `SenderSessionFilter`（按 UMO + 发送者）。匹配到的入站消息被 Host 拦截并投递给等待方，对其他插件与管线不可见；`next()` 逐轮重置 Host 侧计时，超时抛 `TimeoutError`，退出 `async with` 即释放会话认领。
 
 ### LLM
 

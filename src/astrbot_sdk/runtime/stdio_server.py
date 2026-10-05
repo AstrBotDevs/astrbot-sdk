@@ -14,6 +14,7 @@ from typing import Any, BinaryIO
 from ..capabilities import CapabilityGrant, CapabilitySet
 from ..errors import (
     AstrBotSDKError,
+    HostUnavailable,
     InvalidPluginDefinition,
     InvalidRequest,
     RemoteHostError,
@@ -340,11 +341,42 @@ class StdioPluginServer:
                 payload,
             )
             return encode_value(result)
+        if frame.method == "session_consider":
+            event = decode_value(frame.params.get("event"))
+            if not isinstance(event, MessageEvent):
+                raise InvalidRequest("session_consider event must be a MessageEvent")
+            return {"matches": self._session_service()._consider(event)}
+        if frame.method == "session_matched":
+            event = decode_value(frame.params.get("event"))
+            if not isinstance(event, MessageEvent):
+                raise InvalidRequest("session_matched event must be a MessageEvent")
+            self._session_service()._deliver(str(frame.params["waiter_id"]), event)
+            return None
+        if frame.method == "session_timeout":
+            self._session_service()._timeout(str(frame.params["waiter_id"]))
+            return None
         if frame.method == "shutdown":
             await self._stop_plugin()
             self._closing = True
             return None
         raise InvalidRequest(f"unknown Runner method: {frame.method}")
+
+    def _session_service(self) -> Any:
+        """Return the loaded plugin's session service.
+
+        Raises:
+            InvalidRequest: The Runner or its session service is unavailable.
+        """
+        loaded = self.loaded_plugin
+        if loaded is None:
+            raise InvalidRequest("Runner is not initialized")
+        ctx = getattr(getattr(loaded, "instance", None), "ctx", None)
+        if ctx is None:
+            ctx = getattr(loaded, "sdk_ctx", None)
+        sessions = getattr(ctx, "sessions", None)
+        if sessions is None:
+            raise InvalidRequest("plugin context has no session service")
+        return sessions
 
     async def _initialize(self, frame: RequestFrame) -> dict[str, Any]:
         """Load and start the plugin after protocol negotiation.
@@ -723,6 +755,13 @@ class StdioPluginServer:
 
     async def _stop_plugin(self) -> None:
         """Cancel active invocations and stop the loaded plugin."""
+        if self.loaded_plugin is not None:
+            # Unblock pending session waits before tasks are cancelled so a
+            # waiting next() fails with HostUnavailable instead of hanging.
+            with contextlib.suppress(Exception):
+                self._session_service()._fail_all(
+                    HostUnavailable("plugin Runner is shutting down")
+                )
         current_task = asyncio.current_task()
         tasks = [
             task for task, _ in self._invocations.values() if task is not current_task

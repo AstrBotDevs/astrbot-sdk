@@ -15,7 +15,7 @@ from .llm import LLMService
 from .plugins import PluginRegistryService
 from .protocol_registry import register_protocol_dataclass
 from .render import RenderService
-from .services import AssetService, MessageService, PluginStorage
+from .services import AssetService, MessageService, PluginStorage, SessionService
 from .tools import ToolService
 from .web import WebService
 
@@ -62,6 +62,7 @@ class PluginContext[ConfigT]:
     assets: AssetService = field(init=False)
     plugins: PluginRegistryService = field(init=False)
     render: RenderService = field(init=False)
+    sessions: SessionService = field(init=False)
     tools: ToolService = field(init=False)
     llm: LLMService = field(init=False)
     web: WebService = field(init=False)
@@ -87,6 +88,7 @@ class PluginContext[ConfigT]:
         self.assets = AssetService(self)
         self.plugins = PluginRegistryService(self)
         self.render = RenderService(self)
+        self.sessions = SessionService(self)
         self.tools = ToolService(self)
         self.llm = LLMService(self)
         self.web = WebService(self)

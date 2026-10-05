@@ -61,7 +61,7 @@
 
 ## 已决策的后续功能
 
-- [ ] **session 等待能力（session_waiter，设计已定稿 v2，待实现）**：
+- [x] **session 等待能力（session_waiter，设计已定稿 v2，已实现）**：
   语料 57 个插件使用（多轮问答/向导是真实需求）。core 机制 =
   全局 session 注册表 + maxsize 优先级 ALL 事件拦截（匹配则
   trigger + stop_event）+ plugin 进程内 future。隔离模式定稿：

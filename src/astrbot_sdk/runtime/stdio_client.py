@@ -487,6 +487,49 @@ class StdioPluginClient:
         """Probe Runner liveness; returns its protocol version payload."""
         return await self._request("ping", {})
 
+    async def session_consider(
+        self,
+        event: Any,
+        *,
+        timeout: float = 1.0,  # noqa: ASYNC109
+    ) -> Mapping[str, Any]:
+        """Ask the Runner which of its session waiters match one event.
+
+        Args:
+            event: SDK MessageEvent to test against local session filters.
+            timeout: Round-trip budget in seconds; kept short because this
+                runs inside the inbound message pipeline.
+
+        Returns:
+            Mapping with a ``matches`` list of waiter_id/key pairs.
+        """
+        result = await self._request(
+            "session_consider",
+            {"event": encode_value(event)},
+            timeout=timeout,
+        )
+        return result or {}
+
+    async def session_matched(self, waiter_id: str, event: Any) -> None:
+        """Deliver one claimed inbound event to a Runner session waiter.
+
+        Args:
+            waiter_id: Runner-side waiter identifier.
+            event: SDK MessageEvent to queue for the waiter.
+        """
+        await self._request(
+            "session_matched",
+            {"waiter_id": waiter_id, "event": encode_value(event)},
+        )
+
+    async def session_timeout(self, waiter_id: str) -> None:
+        """Fail one Runner session waiter with TimeoutError.
+
+        Args:
+            waiter_id: Runner-side waiter identifier.
+        """
+        await self._request("session_timeout", {"waiter_id": waiter_id})
+
     @property
     def is_running(self) -> bool:
         """Whether the Runner process is alive."""
@@ -551,12 +594,15 @@ class StdioPluginClient:
         self,
         method: str,
         params: Mapping[str, Any],
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
     ) -> Any:
         """Send one request and wait for its final response.
 
         Args:
             method: Runner method name.
             params: JSON-compatible request parameters.
+            timeout: Optional per-request timeout override in seconds.
 
         Returns:
             Successful response result.
@@ -569,8 +615,10 @@ class StdioPluginClient:
         peer = self._peer
         if peer is None:
             raise HostUnavailable("stdio plugin Runner is not running")
-        timeout = self.start_timeout if method == "initialize" else self.timeout
-        return await peer.request(method, params, timeout_seconds=timeout)
+        effective = timeout if timeout is not None else self.timeout
+        if method == "initialize":
+            effective = self.start_timeout
+        return await peer.request(method, params, timeout_seconds=effective)
 
     async def _handle_runner_request(self, frame: RequestFrame) -> Any:
         """Authorize and dispatch one Runner-to-Host capability call.
