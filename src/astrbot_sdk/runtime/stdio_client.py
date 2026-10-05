@@ -186,21 +186,30 @@ class StdioPluginClient:
             self._stderr_task = asyncio.create_task(self._read_stderr())
 
         try:
-            result = await self._request(
-                "initialize",
-                {
-                    "protocol_versions": [PROTOCOL_VERSION],
-                    "config": encode_value(config),
-                    "host": encode_value(dict(host_info or {})),
-                    "capabilities": [
-                        {
-                            "id": grant.id,
-                            "scope": encode_value(grant.scope),
-                        }
-                        for grant in grants.values()
-                    ],
-                },
-            )
+            try:
+                result = await self._request(
+                    "initialize",
+                    {
+                        "protocol_versions": [PROTOCOL_VERSION],
+                        "config": encode_value(config),
+                        "host": encode_value(dict(host_info or {})),
+                        "capabilities": [
+                            {
+                                "id": grant.id,
+                                "scope": encode_value(grant.scope),
+                            }
+                            for grant in grants.values()
+                        ],
+                    },
+                )
+            except TimeoutError as exc:
+                # asyncio.TimeoutError stringifies to an empty message; report
+                # which phase timed out so slow plugin imports/initializers
+                # (e.g. dataset downloads) are diagnosable.
+                raise HostUnavailable(
+                    "plugin Runner did not finish initialization within "
+                    f"{self.start_timeout:g}s (slow plugin import or initialize)"
+                ) from exc
             handshake = self._parse_handshake(result)
             self.handshake = handshake
             return handshake
