@@ -452,13 +452,15 @@ def _legacy_tool_params(method: Any) -> list[dict[str, Any]]:
     parameters = list(signature.parameters.values())
     if parameters and parameters[0].name == "self":
         parameters = parameters[1:]
+    if parameters:
+        # First parameter after self is always the injected event, whatever
+        # its name; legacy tools receive it positionally.
+        parameters = parameters[1:]
     for param in parameters:
         if param.kind in (
             inspect.Parameter.VAR_KEYWORD,
             inspect.Parameter.VAR_POSITIONAL,
         ):
-            continue
-        if param.name in {"event", "context"}:
             continue
         annotation = param.annotation
         json_type = _SIGNATURE_TOOL_PARAM_TYPES.get(annotation)
@@ -530,7 +532,10 @@ def _parse_legacy_args(
     parameters = list(inspect.signature(method).parameters.values())
     if parameters and parameters[0].name == "self":
         parameters = parameters[1:]
-    if parameters and parameters[0].name in {"event", "context"}:
+    if parameters:
+        # The legacy CommandFilter unconditionally treats the first two
+        # signature parameters as self and the event, whatever their names
+        # (plugins may call the event message, ctx, ...).
         parameters = parameters[1:]
 
     result: dict[str, Any] = {}

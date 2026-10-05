@@ -142,6 +142,65 @@ class EmptyRegisterPlugin(Star):
 
 
 @pytest.mark.asyncio
+async def test_legacy_command_event_param_name_is_positional(tmp_path: Path) -> None:
+    # The legacy CommandFilter treats the first parameter after self as the
+    # event whatever its name; plugins may call it message, ctx, etc.
+    plugin_root = tmp_path / "legacy_event_name"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy_event_name",
+                "desc": "event param name test",
+                "author": "AstrBot",
+                "version": "1.0.0",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "main.py").write_text(
+        """
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star
+
+
+class OddEventNamePlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    @filter.command("moe")
+    async def get_moe(self, message: AstrMessageEvent):
+        yield message.plain_result("moe!")
+
+    @filter.command("greet")
+    async def greet(self, ctx: AstrMessageEvent, name: str = "anon"):
+        yield ctx.plain_result(f"hi {name}")
+""",
+        encoding="utf-8",
+    )
+
+    client = StdioPluginClient(
+        plugin_root,
+        python_executable=Path(sys.executable),
+        capability_handler=None,
+        legacy=True,
+    )
+    try:
+        await client.start(granted_capabilities=CapabilitySet.from_ids("storage.kv"))
+
+        results = [r async for r in client.invoke("get_moe", make_event("moe"))]
+        assert [r.message.text for r in results if r is not None] == ["moe!"]
+
+        results = [r async for r in client.invoke("greet", make_event("greet"))]
+        assert [r.message.text for r in results if r is not None] == ["hi anon"]
+
+        results = [r async for r in client.invoke("greet", make_event("greet Moon"))]
+        assert [r.message.text for r in results if r is not None] == ["hi Moon"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_legacy_plugin_runs_unmodified(tmp_path: Path) -> None:
     plugin_root = tmp_path / "legacy_hello"
     write_legacy_plugin(plugin_root)
