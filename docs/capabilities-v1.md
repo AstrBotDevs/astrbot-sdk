@@ -84,14 +84,14 @@ Capability 是用户授权和 Host 鉴权的单位，不与 Python 方法一一�
 
 ## 第一阶段 Capability
 
-### 消息与 Pipeline
+### 消息
 
 | Capability | 允许的行为 |
 | --- | --- |
 | `message.send` | 主动向一个 `UMO` 发送消息或 reaction；包括定时、后台和跨事件发送 |
 | `message.receive` | 注册 `on.message` handler，接收未明确调用插件的普通平台消息 |
-| `pipeline.message.observe` | 只读观察消息发送 Pipeline，例如发送完成事件 |
-| `pipeline.message.modify` | 在发送前读取、修改或阻止消息结果 |
+| `message.observe` | 只读观察消息发送 Pipeline，例如发送完成事件 |
+| `message.modify` | 在发送前读取、修改或阻止消息结果 |
 
 `message.receive` 覆盖通用消息 handler、正则匹配和消息类型匹配。Host 必须先执行可序列化的 handler filter，再把匹配的事件发送给 Runner。Filter 会收窄插件实际收到的事件，但不能代替 capability 授权。
 
@@ -107,14 +107,14 @@ Capability 是用户授权和 Host 鉴权的单位，不与 Python 方法一一�
 | `speech.transcribe` | 调用 STT Provider |
 | `speech.synthesize` | 调用 TTS Provider |
 | `llm.tool.register` | 向 AstrBot Agent 注册当前插件提供的 Tool |
-| `pipeline.llm.observe` | 只读观察 LLM request、response、Agent 和 Tool 调用 Pipeline |
-| `pipeline.llm.modify` | 读取并修改 LLM request、response、Tool call 或 Tool result |
+| `llm.observe` | 只读观察 LLM request、response、Agent 和 Tool 调用 Pipeline |
+| `llm.modify` | 读取并修改 LLM request、response、Tool call 或 Tool result |
 
 `llm.generate` 不返回 Provider 实例。选择模型使用 `provider_id`，调用结果使用 SDK DTO。
 
 调用 `ctx.llm.run_agent` 必须同时拥有 `llm.generate` 和 `llm.agent`。Agent 调用插件 Tool 时，Tool handler 仍受当前插件授权约束。
 
-注册 hook 需要对应的 `pipeline.*.observe`。应用 hook 的修改或 Decision 需要对应的 `pipeline.*.modify`；`pipeline.*.modify` 隐含对应阶段的 `pipeline.*.observe`。
+注册 hook 需要对应域的 `.observe`。应用 hook 的修改或 Decision 需要对应域的 `.modify`；`.modify` 隐含对应域的 `.observe`。
 
 hook 收到的是 Runner 本地可写 DTO，不是 Host 内部可变对象。插件直接修改字段，SDK 把记录到的写操作转换为类型化修改请求，由 Host 校验授权后应用。未授予 `modify` 时，写操作在 Runner 本地生效但不转发，不影响 Pipeline。进程内适配器也必须保持这一约束。
 
@@ -483,10 +483,10 @@ class PluginRegistryService:
 | `on.command` | 默认可用 |
 | `on.message`、regex、消息类型 handler | `message.receive` |
 | `on.tool` | `llm.tool.register` |
-| `hooks.llm_request/llm_response/tool_call/tool_result` | `pipeline.llm.observe`；修改或拦截需 `pipeline.llm.modify` |
-| `hooks.agent_start/agent_end` | `pipeline.llm.observe` |
-| `hooks.message_result` | `pipeline.message.observe`；修改或拦截需 `pipeline.message.modify` |
-| `hooks.message_sent` | `pipeline.message.observe` |
+| `hooks.llm_request/llm_response/tool_call/tool_result` | `llm.observe`；修改或拦截需 `llm.modify` |
+| `hooks.agent_start/agent_end` | `llm.observe` |
+| `hooks.message_result` | `message.observe`；修改或拦截需 `message.modify` |
+| `hooks.message_sent` | `message.observe` |
 | Web route | `web.route` |
 | scheduled job | `scheduler.manage` |
 | `lifecycle.startup/config_changed/shutdown` | 默认可用 |

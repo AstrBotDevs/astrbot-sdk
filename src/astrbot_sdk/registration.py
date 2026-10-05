@@ -103,10 +103,10 @@ class HandlerSpec:
         if self.kind in _HOOK_KINDS:
             stage = self.kind.value.removeprefix("hook.")
             if stage in _LLM_HOOK_STAGES:
-                return "pipeline.llm.observe"
+                return "llm.observe"
             if stage in _PLUGIN_HOOK_STAGES:
                 return "plugin.inspect"
-            return "pipeline.message.observe"
+            return "message.observe"
         return None
 
 

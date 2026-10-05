@@ -351,14 +351,14 @@ hooks 挂入 AstrBot Pipeline 的固定阶段。每个阶段一个装饰器，�
 
 | Decorator | 注入参数 | 可返回 | Capability |
 | --- | --- | --- | --- |
-| `hooks.llm_request()` | `(event, request)` | `None` | `pipeline.llm.observe`；修改需 `pipeline.llm.modify` |
-| `hooks.llm_response()` | `(event, response)` | `None` | `pipeline.llm.observe`；修改需 `pipeline.llm.modify` |
-| `hooks.tool_call()` | `(event, call)` | `ToolCallDecision \| None` | `pipeline.llm.observe`；修改或拦截需 `pipeline.llm.modify` |
-| `hooks.tool_result()` | `(event, result)` | `None` | `pipeline.llm.observe`；修改需 `pipeline.llm.modify` |
-| `hooks.message_result()` | `(event, result)` | `MessageSendDecision \| None` | `pipeline.message.observe`；修改或拦截需 `pipeline.message.modify` |
-| `hooks.message_sent()` | `(event,)` | `None` | `pipeline.message.observe` |
-| `hooks.agent_start()` | `(event,)` | `None` | `pipeline.llm.observe` |
-| `hooks.agent_end()` | `(event,)` | `None` | `pipeline.llm.observe` |
+| `hooks.llm_request()` | `(event, request)` | `None` | `llm.observe`；修改需 `llm.modify` |
+| `hooks.llm_response()` | `(event, response)` | `None` | `llm.observe`；修改需 `llm.modify` |
+| `hooks.tool_call()` | `(event, call)` | `ToolCallDecision \| None` | `llm.observe`；修改或拦截需 `llm.modify` |
+| `hooks.tool_result()` | `(event, result)` | `None` | `llm.observe`；修改需 `llm.modify` |
+| `hooks.message_result()` | `(event, result)` | `MessageSendDecision \| None` | `message.observe`；修改或拦截需 `message.modify` |
+| `hooks.message_sent()` | `(event,)` | `None` | `message.observe` |
+| `hooks.agent_start()` | `(event,)` | `None` | `llm.observe` |
+| `hooks.agent_end()` | `(event,)` | `None` | `llm.observe` |
 
 注入参数与 command、Tool handler 使用同一套类型注入规则。`event` 是触发当前 Pipeline 的 `MessageEvent`；插件通过 `ctx.llm.generate` 等主动发起的调用没有消息事件，此时 `event` 为 `None`，需要区分来源的插件声明 `event: MessageEvent | None`。hook 不使用 `yield`，在 hook 中调用 `event.reply()` 构造的 Result 会被丢弃。
 
@@ -382,8 +382,8 @@ async def add_instruction(
 
 handler 返回后，SDK 把记录到的写操作转换为类型化修改请求发送给 Host，Host 校验授权后应用：
 
-- 注册 hook 需要对应的 `pipeline.*.observe` capability。
-- 应用修改需要对应的 `pipeline.*.modify` capability。未授予 modify 时，插件的写操作在 Runner 本地仍然生效，但不转发给 Host，修改不影响 Pipeline，并向插件 logger 写入一条 warning。插件代码路径不需要感知授权状态。
+- 注册 hook 需要对应域的 `.observe` capability（LLM 阶段为 `llm.observe`，消息发送阶段为 `message.observe`）。
+- 应用修改需要对应域的 `.modify` capability。未授予 modify 时，插件的写操作在 Runner 本地仍然生效，但不转发给 Host，修改不影响 Pipeline，并向插件 logger 写入一条 warning。插件代码路径不需要感知授权状态。
 - 需要主动降级的插件可以检查 `ctx.capabilities.has(...)`。
 
 可写 DTO 支持的写操作：字段赋值、list append/extend/clear、整体替换 list。写入未定义的字段立即抛出 `AttributeError`。
@@ -412,7 +412,7 @@ async def guard(
 
 - `ToolCallDecision.block` 阻止本次 Tool 调用。
 - `MessageSendDecision.block` 阻止消息发送。
-- 拦截需要对应的 `pipeline.*.modify` capability；未授予时 Decision 不生效，并写入 warning 日志。
+- 拦截需要对应域的 `.modify` capability；未授予时 Decision 不生效，并写入 warning 日志。
 - 第一阶段 `agent_start`/`agent_end` 和 `message_sent` 没有可修改的 DTO，也没有 Decision。
 
 hooks 返回 `None` 或 Decision，不使用 `yield`。
