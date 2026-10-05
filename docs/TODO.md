@@ -106,7 +106,10 @@
   `EventResultType`/`CommandResult`）；facade 属性缺口
   （`Context.platform_manager`、`CompatConfig` 任意键访问、
   `Image.to_dict`、`html_render`、`api.web.PluginRequest` 导出、
-  `get_astrbot_root`）。error 桶大头：10 个模块级 StarTools 调用
+  `get_astrbot_root`）。复扫后修复：StarTools/sp/HtmlRenderer 三个
+  facade 绑定提前到 import 之前（模块级调用 StarTools 的 10 个插件
+  全部救回——8 个直接可加载，2 个各归其真实分类），ok 升至
+  1552（64.8%）。error 桶大头：10 个模块级 StarTools 调用
   （loader 在 import 后才绑定，可将绑定提前）、4 个
   register_platform_adapter 属设计排除误分类，其余为坏插件
   （硬编码 /AstrBot 路径、缺配置键、import 期要 API key、语法错误）。

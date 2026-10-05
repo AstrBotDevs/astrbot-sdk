@@ -677,6 +677,24 @@ def load_legacy_plugin(
     module_name = f"{namespace}.main"
     import importlib
 
+    # Bind the legacy facades before any plugin code runs: plugins may touch
+    # StarTools/sp/html_renderer at module import time (top-level statements
+    # and class-body defaults execute during import_module).
+    from .star import CompatConfig
+
+    if config is not None and not isinstance(config, CompatConfig):
+        config = CompatConfig(config)
+    context = CompatContext(ctx, config=config)
+    from .star import StarTools
+
+    StarTools.initialize(context)
+    from .html import HtmlRendererFacade
+
+    HtmlRendererFacade.initialize(ctx)
+    from .api import _SharedPreferences
+
+    _SharedPreferences.initialize(ctx)
+
     # Legacy plugins may bare-import sibling modules (import helpers); the
     # in-process loader keeps plugin dirs on sys.path, so mirror that.
     if str(root) not in sys.path:
@@ -699,20 +717,6 @@ def load_legacy_plugin(
         raise PluginImportError(f"failed to import legacy plugin: {exc}") from exc
 
     star_class = _find_star_class(module, namespace)
-    from .star import CompatConfig
-
-    if config is not None and not isinstance(config, CompatConfig):
-        config = CompatConfig(config)
-    context = CompatContext(ctx, config=config)
-    from .star import StarTools
-
-    StarTools.initialize(context)
-    from .html import HtmlRendererFacade
-
-    HtmlRendererFacade.initialize(ctx)
-    from .api import _SharedPreferences
-
-    _SharedPreferences.initialize(ctx)
     declared = getattr(star_class, "__astrbot_register__", None)
     if declared:
         previous_name = metadata.name
