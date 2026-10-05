@@ -386,6 +386,12 @@ def install() -> None:
     session_waiter_mod.USER_SESSIONS = sessions.USER_SESSIONS
     session_waiter_mod.FILTERS = sessions.FILTERS
 
+    # Old astrbot.api.util re-exported the session waiter trio.
+    api_util_mod = ModuleType("astrbot.api.util")
+    api_util_mod.SessionController = sessions.SessionController
+    api_util_mod.SessionWaiter = sessions.SessionWaiter
+    api_util_mod.session_waiter = sessions.session_waiter
+
     agent_message_mod = ModuleType("astrbot.core.agent.message")
     agent_message_mod.Message = _AgentMessage
     agent_message_mod.UserMessageSegment = _AgentMessage
@@ -617,6 +623,7 @@ def install() -> None:
     sys.modules["astrbot.api.message"] = message_mod
     sys.modules["astrbot.api.all"] = all_mod
     sys.modules["astrbot.api.web"] = web_mod
+    sys.modules["astrbot.api.util"] = api_util_mod
 
     # Type-only astrbot.core submodules are safe to expose; everything else
     # under astrbot.core stays blocked (live Host internals).

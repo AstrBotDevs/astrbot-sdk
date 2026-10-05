@@ -7,7 +7,9 @@ at the protocol boundary.
 
 from __future__ import annotations
 
+import base64
 import enum
+from pathlib import Path
 from typing import Any
 
 from ...message_components import (
@@ -57,6 +59,28 @@ from ...results import MessageResult as SDKMessageResult
 from ...results import Propagation
 
 
+def _media_source(url: Any, file: Any) -> Any:
+    """Resolve a legacy media source into a form the outbound uploader accepts.
+
+    Local path strings become ``Path`` objects (uploaded via assets.transfer);
+    ``base64://`` strings are decoded to bytes. Public URLs pass through.
+
+    Args:
+        url: Legacy ``url`` field, preferred when set.
+        file: Legacy ``file`` field fallback.
+
+    Returns:
+        A URL string, ``Path``, or bytes suitable as a media segment source.
+    """
+    source = url or file
+    if isinstance(source, str):
+        if source.startswith("base64://"):
+            return base64.b64decode(source[len("base64://") :])
+        if source and not source.startswith(("http://", "https://")):
+            return Path(source)
+    return source
+
+
 def to_sdk_segment(component: Any) -> MessageSegment:
     """Convert one compat component into the new SDK segment."""
     if isinstance(component, Plain):
@@ -73,18 +97,18 @@ def to_sdk_segment(component: Any) -> MessageSegment:
             text=component.message_str or None,
         )
     if isinstance(component, Image):
-        return SDKImage(source=component.url or component.file)
+        return SDKImage(source=_media_source(component.url, component.file))
     if isinstance(component, Record):
-        return SDKRecord(source=component.url or component.file)
+        return SDKRecord(source=_media_source(component.url, component.file))
     if isinstance(component, Video):
-        return SDKVideo(source=component.url or component.file)
+        return SDKVideo(source=_media_source(component.url, component.file))
     if isinstance(component, Face):
         return SDKFace(id=int(component.id))
     if isinstance(component, Forward):
         return SDKForward(id=str(component.id))
     if isinstance(component, File):
         return SDKFile(
-            source=component.url or component.file_,
+            source=_media_source(component.url, component.file_),
             filename=component.name or None,
         )
     if isinstance(component, Nodes):

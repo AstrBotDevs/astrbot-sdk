@@ -20,7 +20,8 @@ from ...errors import (
 )
 from ...events import MessageType, SenderRole
 from ...registration import HandlerKind, HandlerRegistration, HandlerSpec
-from ...results import EventResult
+from ...results import EventResult, MessageResult
+from ...services import prepare_outbound_chain
 from . import api as compat_api
 from .components import MessageEventResult
 from .event import (
@@ -100,6 +101,22 @@ class CompatLoadedPlugin:
             self.instance.context._tasks.clear()
             self._started = False
 
+    async def _prepare_result(self, result: EventResult | None) -> EventResult | None:
+        # Upload local media sources so outbound chains only carry asset
+        # references or public URLs across the protocol.
+        if isinstance(result, MessageResult):
+            prepared = await prepare_outbound_chain(
+                result.message,
+                self.sdk_ctx.assets,
+            )
+            if prepared is not result.message:
+                return MessageResult(
+                    propagation=result.propagation,
+                    message=prepared,
+                    quote=result.quote,
+                )
+        return result
+
     async def invoke(
         self,
         handler_id: str,
@@ -111,12 +128,12 @@ class CompatLoadedPlugin:
         if inspect.isasyncgen(outcome):
             try:
                 async for item in outcome:
-                    yield item
+                    yield await self._prepare_result(item)
             finally:
                 await outcome.aclose()
             return
         result = await outcome
-        yield result
+        yield await self._prepare_result(result)
 
     async def invoke_hook(
         self,
@@ -282,6 +299,7 @@ def _compile_filters(
     path = None
     aliases: tuple[str, ...] = ()
     regex = None
+    regex_flags = 0
     message_types: list[MessageType] = []
     platforms: list[str] = []
     roles: list[SenderRole] = []
@@ -292,7 +310,14 @@ def _compile_filters(
             path = spec.command_name
             aliases = tuple(sorted(spec.alias))
         elif isinstance(spec, RegexFilter):
-            regex = spec.regex
+            raw_regex = spec.regex
+            if isinstance(raw_regex, re.Pattern):
+                # Old plugins may pass a compiled pattern; only its source
+                # and flags can cross the protocol boundary.
+                regex = raw_regex.pattern
+                regex_flags = raw_regex.flags
+            else:
+                regex = raw_regex
         elif isinstance(spec, EventMessageTypeFilter):
             raw = spec.event_message_type
             from .event import EventMessageType
@@ -354,6 +379,7 @@ def _compile_filters(
             platforms=tuple(platforms),
             roles=tuple(roles),
             regex=regex,
+            regex_flags=regex_flags,
         ),
         custom_filters,
     )
