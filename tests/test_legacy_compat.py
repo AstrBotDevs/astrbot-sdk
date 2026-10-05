@@ -15,6 +15,7 @@ from astrbot_sdk.events import (
     MessageRef,
     MessageType,
     Sender,
+    SenderRole,
 )
 from astrbot_sdk.message_components import Plain
 from astrbot_sdk.messages import MessageChain
@@ -349,5 +350,88 @@ async def test_legacy_plugin_runs_unmodified(tmp_path: Path) -> None:
 
         results = [r async for r in client.invoke("on_ping", make_event("ping"))]
         assert [r.message.text for r in results if r is not None] == ["pong"]
+    finally:
+        await client.close()
+
+
+GROUP_PLUGIN = """
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, register
+
+
+@register("legacy_group", "Tester", "desc", "1.0.0")
+class GroupPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    @filter.command_group("kimi")
+    def kimi(self):
+        pass
+
+    @kimi.custom_filter(filter.PermissionTypeFilter, filter.PermissionType.ADMIN)
+    @kimi.command("login")
+    async def kimi_login(self, event: AstrMessageEvent):
+        yield event.plain_result("login ok")
+
+    @kimi.command("public")
+    async def kimi_public(self, event: AstrMessageEvent):
+        yield event.plain_result("public ok")
+"""
+
+
+@pytest.mark.asyncio
+async def test_legacy_command_group_custom_filter(tmp_path: Path) -> None:
+    # Real-world pattern (astrbot_plugin_kimi_datasource_api): a custom
+    # filter attached to the command group gates each sub-command.
+    plugin_root = tmp_path / "legacy_group"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy_group",
+                "desc": "legacy command group test plugin",
+                "author": "AstrBot",
+                "version": "1.0.0",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (plugin_root / "main.py").write_text(GROUP_PLUGIN, encoding="utf-8")
+
+    client = StdioPluginClient(
+        plugin_root,
+        python_executable=Path(sys.executable),
+        capability_handler=None,
+        legacy=True,
+    )
+    try:
+        handshake = await client.start()
+        handler_ids = {h.id for h in handshake.handlers}
+        assert handler_ids == {"kimi_login", "kimi_public"}
+
+        # Non-admin senders are rejected by the group custom filter.
+        results = [
+            r async for r in client.invoke("kimi_login", make_event("kimi login"))
+        ]
+        assert [r for r in results if r is not None] == []
+
+        # The same command succeeds for admins.
+        admin_event = MessageEvent(
+            id="event-2",
+            umo=UMO("platform-1", MessageType.PRIVATE, "admin-1"),
+            platform_type="webchat",
+            message_ref=MessageRef("message-2"),
+            message=MessageChain(Plain("kimi login")),
+            sender=Sender("admin-1", "Root", SenderRole.ADMIN),
+            timestamp=datetime.now(UTC),
+        )
+        results = [r async for r in client.invoke("kimi_login", admin_event)]
+        assert [r.message.text for r in results if r is not None] == ["login ok"]
+
+        # Sub-commands without the filter stay open to members.
+        results = [
+            r async for r in client.invoke("kimi_public", make_event("kimi public"))
+        ]
+        assert [r.message.text for r in results if r is not None] == ["public ok"]
     finally:
         await client.close()

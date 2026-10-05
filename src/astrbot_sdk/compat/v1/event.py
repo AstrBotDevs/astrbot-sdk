@@ -55,6 +55,15 @@ class PermissionTypeFilter:
         self.permission_type = permission_type
         self.raise_error = raise_error
 
+    def filter(self, event: Any, cfg: Any = None) -> bool:
+        """Runtime permission check, mirroring the in-process filter."""
+        del cfg
+        if self.permission_type & PermissionType.ADMIN or (
+            self.permission_type & PermissionType.GROUP_ADMIN and event.get_group_id()
+        ):
+            return bool(event.is_admin())
+        return True
+
 
 class PlatformAdapterTypeFilter:
     def __init__(self, platform_adapter_type_or_str: Any) -> None:
@@ -62,7 +71,16 @@ class PlatformAdapterTypeFilter:
 
 
 class CustomFilter:
-    def __init__(self, custom_filter: Any) -> None:
+    """Marker for legacy custom filters.
+
+    The old core instantiates the filter class with a single positional
+    argument (its raise_error slot, default True); already-instantiated
+    filters are used as-is.
+    """
+
+    def __init__(self, custom_filter: Any, *args: Any) -> None:
+        if isinstance(custom_filter, type):
+            custom_filter = custom_filter(args[0] if args else True)
         self.custom_filter = custom_filter
 
 
@@ -73,15 +91,21 @@ class _CommandGroup:
     ("group sub") on the target handler.
     """
 
-    def __init__(self, prefix: str) -> None:
+    def __init__(self, prefix: str, filters: tuple = ()) -> None:
         self.prefix = prefix
+        # Group-scoped filters (RegisteringCommandable.custom_filter in the
+        # old core) propagated to every sub-command of the group.
+        self.filters = filters
 
     def command(self, name: str, alias: set | None = None, **_: Any) -> Any:
         full = f"{self.prefix} {name}"
         aliases = {f"{self.prefix} {a}" for a in (alias or set())}
 
         def decorator(handler: Any) -> Any:
-            return _accumulate(handler, CommandFilter(full, aliases))
+            handler = _accumulate(handler, CommandFilter(full, aliases))
+            for marker in self.filters:
+                handler = _accumulate(handler, marker)
+            return handler
 
         return decorator
 
@@ -89,14 +113,26 @@ class _CommandGroup:
         full = f"{self.prefix} {name}"
 
         def decorator(handler: Any) -> Any:
-            _accumulate(handler, CommandFilter(full, alias))
-            return _CommandGroup(full)
+            handler = _accumulate(handler, CommandFilter(full, alias))
+            for marker in self.filters:
+                handler = _accumulate(handler, marker)
+            return _CommandGroup(full, self.filters)
 
         return decorator
 
     def group(self, name: str, alias: set | None = None, **kwargs: Any) -> Any:
         """Legacy alias of command_group (RegisteringCommandable.group)."""
         return self.command_group(name, alias, **kwargs)
+
+    def custom_filter(self, custom_filter: Any, *args: Any, **_: Any) -> Any:
+        marker = CustomFilter(custom_filter, *args)
+
+        def decorator(awaitable: Any) -> Any:
+            if isinstance(awaitable, _CommandGroup):
+                return _CommandGroup(awaitable.prefix, (*awaitable.filters, marker))
+            return _accumulate(awaitable, marker)
+
+        return decorator
 
 
 class HookMarker:
@@ -210,7 +246,9 @@ class _FilterNamespace:
 
     EventMessageType = EventMessageType
     PermissionType = PermissionType
+    PermissionTypeFilter = PermissionTypeFilter
     PlatformAdapterType = PlatformAdapterType
+    PlatformAdapterTypeFilter = PlatformAdapterTypeFilter
     CustomFilter = CustomFilter
 
     def command(self, command_name: str, alias: set | None = None, **_: Any) -> Any:
@@ -261,8 +299,12 @@ class _FilterNamespace:
         return decorator
 
     def custom_filter(self, custom_filter: Any, *args: Any, **_: Any) -> Any:
-        def decorator(handler: Any) -> Any:
-            return _accumulate(handler, CustomFilter(custom_filter))
+        marker = CustomFilter(custom_filter, *args)
+
+        def decorator(awaitable: Any) -> Any:
+            if isinstance(awaitable, _CommandGroup):
+                return _CommandGroup(awaitable.prefix, (*awaitable.filters, marker))
+            return _accumulate(awaitable, marker)
 
         return decorator
 

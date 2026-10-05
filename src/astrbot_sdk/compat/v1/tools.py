@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any
 
 from ...tools import Tool, ToolParam
 from .event import AstrMessageEvent
 
 
+@dataclass
 class FunctionTool:
     """Legacy class-form tool base.
 
-    Plugins subclass it (usually as a dataclass) declaring ``name``,
-    ``description`` and a JSON-schema ``parameters`` dict, and implement
-    ``call``. The legacy ``run`` method name is accepted here too; the new
-    SDK itself only knows ``call``.
+    Mirrors the in-core pydantic dataclass shape: plugins subclass it
+    declaring ``name``, ``description`` and a JSON-schema ``parameters``
+    dict, and implement ``call`` (legacy ``run`` is accepted here too; the
+    new SDK itself only knows ``call``). Alternatively a plain ``handler``
+    callable can be supplied, taking priority like in the old core.
     """
 
-    name: ClassVar[str] = ""
-    description: ClassVar[str] = ""
-    parameters: ClassVar[dict] = {}
+    name: str = ""
+    description: str = ""
+    parameters: dict = field(default_factory=dict)
+    handler: Any = None
+    handler_module_path: str | None = None
     active: bool = True
 
     def __class_getitem__(cls, item: Any) -> type:
@@ -90,6 +96,12 @@ class LegacyFunctionToolAdapter(Tool):
 
     async def call(self, call, **kwargs: Any) -> Any:
         """Invoke the legacy call(context, **kwargs) with a facade wrapper."""
+        if self._legacy_tool.handler is not None:
+            # A plain handler callable takes priority, like in the old core.
+            result = self._legacy_tool.handler(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         event = None
         if getattr(call, "event", None) is not None:
             event = AstrMessageEvent(call.event, self._context)
