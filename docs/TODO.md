@@ -43,6 +43,16 @@
   （`ctx.capabilities` 快照替换），需要 Host → Runner 的更新通道。
 - [ ] **配额与可观测性**：KV 的大小限制与配额（文档已承诺）；capability
   调用/拒绝的审计日志增强与 metrics。
+- [ ] **远端 Runner 的模块身份（虚拟根）**：loader 目前靠
+  `ASTRBOT_DATA_PATH` 或 `<root>/data/plugins/<name>` 布局解析 AstrBot
+  根目录，把 legacy 插件按真实点分路径 `data.plugins.<dir>.main` 导入
+  （spawn 子进程/Flask instance path/资源 introspection 全依赖此身份）。
+  远端 WS Runner 所在机器没有 AstrBot 根，两条线索都没有，会静默回退
+  旧的合成命名空间——上述坑在远端重新出现。定案方向：A 为主——约定
+  远端 runner 把插件放在 `<runner_root>/data/plugins/<name>/` 并自设
+  `ASTRBOT_DATA_PATH`（零新代码，随远端部署文档落地）；B 为兜底——
+  检测不到根时在 sys.modules 手工挂 `data`/`data.plugins` 命名空间包、
+  `__path__` 指向插件真实父目录后照常 import（约十几行，跨平台）。
 
 ## event-context 合并后的跟进
 
