@@ -77,7 +77,6 @@ def _load_metadata_for_legacy(plugin_root: Path) -> PluginMetadata:
     support_platforms = data.get("support_platforms")
     if not isinstance(support_platforms, list):
         support_platforms = ()
-    i18n = data.get("i18n") if isinstance(data.get("i18n"), Mapping) else {}
     return PluginMetadata(
         schema_version=1,
         name=name,
@@ -90,7 +89,6 @@ def _load_metadata_for_legacy(plugin_root: Path) -> PluginMetadata:
             str(data.get("astrbot_version")) if data.get("astrbot_version") else None
         ),
         support_platforms=tuple(str(item) for item in support_platforms),
-        i18n=i18n,
         author=author,
         version=str(data.get("version") or "0.0.0"),
         desc=str(data.get("desc") or ""),

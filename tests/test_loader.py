@@ -300,7 +300,6 @@ def test_legacy_metadata_reads_display_fields(tmp_path: Path) -> None:
                 "repo": "https://example.com/repo",
                 "astrbot_version": ">=4.0.0",
                 "support_platforms": ["telegram", "webchat"],
-                "i18n": {"zh-CN": {"desc": "描述"}},
             }
         ),
         encoding="utf-8",
@@ -313,4 +312,3 @@ def test_legacy_metadata_reads_display_fields(tmp_path: Path) -> None:
     assert metadata.repo == "https://example.com/repo"
     assert metadata.astrbot_version == ">=4.0.0"
     assert metadata.support_platforms == ("telegram", "webchat")
-    assert metadata.i18n == {"zh-CN": {"desc": "描述"}}
