@@ -34,6 +34,7 @@ from astrbot.api.all import (
     Plain,
     Star,
     command,
+    command_group,
     register,
 )
 from astrbot.api.star import StarTools
@@ -89,6 +90,14 @@ class LegacySurfacePlugin(Star):
         conv = await manager.get_conversation(event.unified_msg_origin, cid)
         history = json.loads(conv.history)
         yield event.plain_result(f"conv={len(history)}:{history[0]['content']}")
+
+    @command_group("grp")
+    async def grp(self, event: AstrMessageEvent):
+        yield event.plain_result("grp-help")
+
+    @grp.command("sub")
+    async def sub(self, event: AstrMessageEvent, name: str = None):
+        yield event.plain_result(f"sub={name}")
 
     @command("curconv")
     async def curconv(self, event: AstrMessageEvent):
@@ -281,6 +290,23 @@ async def test_legacy_surface(tmp_path: Path) -> None:
         ]
         assert [r.message.text for r in results if r is not None] == [
             "greedy=some long text here",
+        ]
+
+        # Command groups are flagged in the handshake descriptor so the
+        # host can register them as usage-tree anchors.
+        descriptors = {handler.id: handler for handler in handshake.handlers}
+        assert descriptors["grp"].details["group"] is True
+        assert descriptors["sub"].details["group"] is False
+
+        # Command-group sub-command: the full multi-token path prefix is
+        # stripped before positional args are bound.
+        results = [r async for r in client.invoke("sub", make_event("grp sub"))]
+        assert [r.message.text for r in results if r is not None] == [
+            "sub=None",
+        ]
+        results = [r async for r in client.invoke("sub", make_event("/grp sub alice"))]
+        assert [r.message.text for r in results if r is not None] == [
+            "sub=alice",
         ]
 
         # StarTools.get_data_dir lands on the AstrBot plugin_data path.

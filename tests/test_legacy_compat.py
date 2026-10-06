@@ -408,7 +408,10 @@ async def test_legacy_command_group_custom_filter(tmp_path: Path) -> None:
     try:
         handshake = await client.start()
         handler_ids = {h.id for h in handshake.handlers}
-        assert handler_ids == {"kimi_login", "kimi_public"}
+        # The group anchor registers too (mirroring in-process
+        # register_command_group) so bare group messages surface the
+        # usage tree instead of falling through to the LLM.
+        assert handler_ids == {"kimi", "kimi_login", "kimi_public"}
 
         # Non-admin senders are rejected by the group custom filter.
         results = [

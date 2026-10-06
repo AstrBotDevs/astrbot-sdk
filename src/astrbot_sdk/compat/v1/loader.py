@@ -35,6 +35,7 @@ from .event import (
     PermissionTypeFilter,
     PlatformAdapterTypeFilter,
     RegexFilter,
+    _CommandGroup,
     translate_compat_result,
 )
 from .hooks import HOOK_STAGE_KINDS, invoke_compat_hook
@@ -319,6 +320,7 @@ def _compile_filters(
             return HandlerSpec(kind=HandlerKind.TOOL, tool_name=spec.name), []
 
     path = None
+    group = False
     aliases: tuple[str, ...] = ()
     regex = None
     regex_flags = 0
@@ -330,6 +332,7 @@ def _compile_filters(
     for spec in filters:
         if isinstance(spec, CommandFilter):
             path = spec.command_name
+            group = spec.is_group
             aliases = tuple(sorted(spec.alias))
         elif isinstance(spec, RegexFilter):
             raw_regex = spec.regex
@@ -387,6 +390,7 @@ def _compile_filters(
             HandlerSpec(
                 kind=HandlerKind.COMMAND,
                 path=path,
+                group=group,
                 aliases=aliases,
                 message_types=tuple(message_types),
                 platforms=tuple(platforms),
@@ -545,11 +549,18 @@ def _parse_legacy_args(
     optional params, and GreedyStr joining the remainder.
     """
     tokens = text.split()
-    if tokens:
-        head = tokens[0].lstrip("/")
-        candidates = {spec.path or "", *spec.aliases}
-        if head in candidates:
-            tokens = tokens[1:]
+    # Strip the matched command prefix as a whole: command paths may span
+    # multiple tokens (e.g. group sub-commands "group sub"), so match the
+    # longest candidate (path or alias) token-by-token instead of just the
+    # first token. Only the first token may carry the "/" wake prefix.
+    best = 0
+    for candidate in (spec.path or "", *spec.aliases):
+        parts = candidate.split()
+        if not parts or len(parts) > len(tokens) or len(parts) <= best:
+            continue
+        if [tokens[0].lstrip("/"), *tokens[1 : len(parts)]] == parts:
+            best = len(parts)
+    tokens = tokens[best:]
 
     parameters = list(inspect.signature(method).parameters.values())
     if parameters and parameters[0].name == "self":
@@ -819,10 +830,26 @@ def load_legacy_plugin(
         # instance may raise or perform side effects, and they can never be
         # decorated handlers anyway.
         raw = inspect.getattr_static(instance, method_name)
-        filters = getattr(raw, _FILTERS_ATTR, None)
-        if not filters:
-            continue
-        method = getattr(instance, method_name)
+        if isinstance(raw, _CommandGroup):
+            # The command_group decorator replaces the class attribute with
+            # this handle: the anchor's own filters live on raw.handler,
+            # while decorators applied above command_group accumulate onto
+            # the handle itself.
+            anchor = raw.handler
+            if anchor is None:
+                continue
+            filters = [
+                *getattr(raw, _FILTERS_ATTR, ()),
+                *getattr(anchor, _FILTERS_ATTR, ()),
+            ]
+            if not filters:
+                continue
+            method = anchor.__get__(instance, type(instance))
+        else:
+            filters = getattr(raw, _FILTERS_ATTR, None)
+            if not filters:
+                continue
+            method = getattr(instance, method_name)
         spec, custom_filters = _compile_filters(filters)
         if spec.kind is HandlerKind.TOOL:
             handler = _wrap_tool(instance, method)
@@ -838,6 +865,7 @@ def load_legacy_plugin(
             id=method_name,
             description=inspect.getdoc(method),
             path=spec.path,
+            group=spec.group,
             aliases=spec.aliases,
             tool_name=spec.tool_name,
             message_types=spec.message_types,

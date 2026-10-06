@@ -35,9 +35,17 @@ def _accumulate(handler: Any, filter_spec: Any) -> Any:
 
 
 class CommandFilter:
-    def __init__(self, command_name: str, alias: set | None = None) -> None:
+    def __init__(
+        self,
+        command_name: str,
+        alias: set | None = None,
+        is_group: bool = False,
+    ) -> None:
         self.command_name = command_name
         self.alias = alias or set()
+        # Group anchors render the usage tree on a bare group-name message
+        # (in-process CommandGroupFilter) instead of running the handler.
+        self.is_group = is_group
 
 
 class RegexFilter:
@@ -91,11 +99,14 @@ class _CommandGroup:
     ("group sub") on the target handler.
     """
 
-    def __init__(self, prefix: str, filters: tuple = ()) -> None:
+    def __init__(self, prefix: str, filters: tuple = (), handler: Any = None) -> None:
         self.prefix = prefix
         # Group-scoped filters (RegisteringCommandable.custom_filter in the
         # old core) propagated to every sub-command of the group.
         self.filters = filters
+        # The decorator replaces the class attribute with this handle, so the
+        # loader must scan the group anchor's filters from here.
+        self.handler = handler
 
     def command(self, name: str, alias: set | None = None, **_: Any) -> Any:
         full = f"{self.prefix} {name}"
@@ -113,10 +124,10 @@ class _CommandGroup:
         full = f"{self.prefix} {name}"
 
         def decorator(handler: Any) -> Any:
-            handler = _accumulate(handler, CommandFilter(full, alias))
+            handler = _accumulate(handler, CommandFilter(full, alias, is_group=True))
             for marker in self.filters:
                 handler = _accumulate(handler, marker)
-            return _CommandGroup(full, self.filters)
+            return _CommandGroup(full, self.filters, handler=handler)
 
         return decorator
 
@@ -129,7 +140,11 @@ class _CommandGroup:
 
         def decorator(awaitable: Any) -> Any:
             if isinstance(awaitable, _CommandGroup):
-                return _CommandGroup(awaitable.prefix, (*awaitable.filters, marker))
+                return _CommandGroup(
+                    awaitable.prefix,
+                    (*awaitable.filters, marker),
+                    handler=awaitable.handler,
+                )
             return _accumulate(awaitable, marker)
 
         return decorator
@@ -296,8 +311,8 @@ class _FilterNamespace:
         self, command_name: str, alias: set | None = None, **_: Any
     ) -> Any:
         def decorator(handler: Any) -> Any:
-            _accumulate(handler, CommandFilter(command_name, alias))
-            return _CommandGroup(command_name)
+            _accumulate(handler, CommandFilter(command_name, alias, is_group=True))
+            return _CommandGroup(command_name, handler=handler)
 
         return decorator
 
@@ -338,7 +353,11 @@ class _FilterNamespace:
 
         def decorator(awaitable: Any) -> Any:
             if isinstance(awaitable, _CommandGroup):
-                return _CommandGroup(awaitable.prefix, (*awaitable.filters, marker))
+                return _CommandGroup(
+                    awaitable.prefix,
+                    (*awaitable.filters, marker),
+                    handler=awaitable.handler,
+                )
             return _accumulate(awaitable, marker)
 
         return decorator
