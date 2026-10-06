@@ -280,3 +280,37 @@ class TestPlugin(Plugin):
 
     with pytest.raises(InvalidPluginDefinition, match="undeclared"):
         load_plugin(plugin_root)
+
+
+def test_legacy_metadata_reads_display_fields(tmp_path: Path) -> None:
+    """Legacy metadata.yaml fields must reach the dashboard card like in-process."""
+    from astrbot_sdk.runtime.loader import _load_metadata_for_legacy
+
+    plugin_root = tmp_path / "my_plugin"
+    plugin_root.mkdir()
+    (plugin_root / "metadata.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "my_plugin",
+                "desc": "Long description",
+                "author": "Tester",
+                "version": "2.3.4",
+                "display_name": "我的插件",
+                "short_desc": "Short",
+                "repo": "https://example.com/repo",
+                "astrbot_version": ">=4.0.0",
+                "support_platforms": ["telegram", "webchat"],
+                "i18n": {"zh-CN": {"desc": "描述"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = _load_metadata_for_legacy(plugin_root)
+
+    assert metadata.display_name == "我的插件"
+    assert metadata.short_desc == "Short"
+    assert metadata.repo == "https://example.com/repo"
+    assert metadata.astrbot_version == ">=4.0.0"
+    assert metadata.support_platforms == ("telegram", "webchat")
+    assert metadata.i18n == {"zh-CN": {"desc": "描述"}}
