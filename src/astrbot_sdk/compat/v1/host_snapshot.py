@@ -422,6 +422,23 @@ class ProviderManagerFacade:
                 return found
         return self.provider_insts[0] if self.provider_insts else None
 
+    def register_provider_change_hook(self, hook: Any) -> None:
+        """Accept a provider-change hook subscription (never fires isolated).
+
+        Provider-change notifications originate inside the Host provider
+        manager and have no RPC push channel yet. Registration is accepted
+        so plugins that also reconcile periodically keep working degraded;
+        the limitation is logged once instead of failing plugin load.
+        """
+        if not hasattr(self, "_provider_change_hooks"):
+            self._provider_change_hooks = []
+            logging.getLogger("astrbot.compat").warning(
+                "provider change hooks do not fire in isolated legacy mode; "
+                "plugins relying on them degrade to snapshot-based reads"
+            )
+        if hook not in self._provider_change_hooks:
+            self._provider_change_hooks.append(hook)
+
     def get_using_provider(
         self,
         provider_type: Any,
@@ -457,3 +474,214 @@ class ProviderManagerFacade:
 def copy_global_config(snapshot: dict, umo: str | None) -> GlobalConfig:
     """Return a deep-copied routed global config facade."""
     return GlobalConfig(copy.deepcopy(route_config(snapshot, umo)))
+
+
+def _umo_str(umo: Any) -> str | None:
+    """Normalize a legacy umo argument (str or MessageSesion) to a string."""
+    if umo is None:
+        return None
+    return str(umo)
+
+
+class PlatformFacade:
+    """Legacy Platform adapter facade served from the handshake snapshot."""
+
+    def __init__(self, facade_context: Any, entry: dict) -> None:
+        """Build the facade from one snapshot platform entry.
+
+        Args:
+            facade_context: Legacy Context facade used to reach the Host.
+            entry: Snapshot platform metadata dict (id/name/description).
+        """
+        self._facade_context = facade_context
+        self._entry = dict(entry)
+        # Legacy plugins may read platform.config; the real adapter config is
+        # Host-only, so expose an empty dict rather than a stale secret copy.
+        self.config: dict = {}
+        self.client_self_id = ""
+
+    def meta(self) -> Any:
+        """Return the adapter metadata namespace (mirrors core Platform.meta)."""
+        return SimpleNamespace(
+            name=self._entry.get("name") or "",
+            description=self._entry.get("description") or "",
+            id=self._entry.get("id") or "",
+            default_config_tmpl=None,
+            adapter_display_name=self._entry.get("adapter_display_name"),
+            logo_path=None,
+        )
+
+    def get_client(self) -> Any:
+        """Return the raw bot client proxy for this platform instance."""
+        from .platform_events import LegacyBotProxy
+
+        return LegacyBotProxy(
+            self._facade_context,
+            self._entry.get("id") or "",
+            self._entry.get("name") or "",
+        )
+
+    @property
+    def bot(self) -> Any:
+        """Alias of get_client() used by some legacy plugins."""
+        return self.get_client()
+
+
+class PlatformManagerFacade:
+    """Legacy platform_manager served from the handshake snapshot."""
+
+    def __init__(self, facade_context: Any, snapshot: dict) -> None:
+        """Build the facade from the handshake snapshot."""
+        self._facade_context = facade_context
+        self.platform_insts = [
+            PlatformFacade(facade_context, entry)
+            for entry in snapshot.get("platforms") or []
+        ]
+
+    def get_insts(self) -> list:
+        """Return the running platform adapter facades."""
+        return list(self.platform_insts)
+
+    @property
+    def event_queue(self) -> Any:
+        """The Host event queue is host-internal (unsupported).
+
+        Custom platform adapter plugins cannot run isolated: the adapter
+        must live in the Host process to push events into the pipeline.
+        """
+        raise IsolationUnsupportedError(
+            "platform_manager.event_queue is unavailable in isolated legacy "
+            "mode; custom platform adapters must run in-process."
+        )
+
+    def _unsupported(self, method: str) -> None:
+        raise IsolationUnsupportedError(
+            f"platform_manager.{method} is unavailable in isolated legacy mode; "
+            "platform lifecycle is Host-managed."
+        )
+
+    def load_platform(self, *args: Any, **kwargs: Any) -> Any:
+        """Platform lifecycle is Host-managed in isolated mode."""
+        self._unsupported("load_platform")
+
+    async def terminate_platform(self, *args: Any, **kwargs: Any) -> Any:
+        """Platform lifecycle is Host-managed in isolated mode."""
+        self._unsupported("terminate_platform")
+
+    async def reload_platform(self, *args: Any, **kwargs: Any) -> Any:
+        """Platform lifecycle is Host-managed in isolated mode."""
+        self._unsupported("reload_platform")
+
+
+class UcrFacade:
+    """Legacy umop_config_router facade: sync reads, routed writes."""
+
+    def __init__(self, facade_context: Any, snapshot: dict) -> None:
+        """Build the facade from the handshake snapshot."""
+        self._facade_context = facade_context
+        self.umop_to_conf_id: dict[str, str] = dict(snapshot.get("config_routes") or {})
+
+    @staticmethod
+    def _split_umo(umo: Any) -> tuple[str, str, str] | None:
+        """Split one umo into 3 parts, preserving ':' in the session id."""
+        if not isinstance(umo, str):
+            return None
+        parts = umo.split(":", 2)
+        if len(parts) != 3:
+            return None
+        return parts[0], parts[1], parts[2]
+
+    def _is_umo_match(self, p1: str, p2: str) -> bool:
+        """Return True when pattern p1 logically covers target umo p2."""
+        p1_ls = self._split_umo(p1)
+        p2_ls = self._split_umo(p2)
+        if p1_ls is None or p2_ls is None:
+            return False
+        return all(p == "" or fnmatch.fnmatchcase(t, p) for p, t in zip(p1_ls, p2_ls))
+
+    def get_conf_id_for_umop(self, umo: Any) -> str | None:
+        """Resolve the config profile ID routed for one umo."""
+        umo = _umo_str(umo)
+        if umo is None:
+            return None
+        for pattern, conf_id in self.umop_to_conf_id.items():
+            if self._is_umo_match(pattern, umo):
+                return conf_id
+        return None
+
+    async def update_route(self, umo: Any, conf_id: str) -> None:
+        """Update one route on the Host and mirror it locally.
+
+        Raises:
+            ValueError: The umo format is invalid.
+        """
+        umo = _umo_str(umo)
+        if umo is None or self._split_umo(umo) is None:
+            raise ValueError(
+                "umop must be a string in the format "
+                "[platform_id]:[message_type]:[session_id], with optional "
+                "wildcards * or empty for all",
+            )
+        await self._facade_context._ctx._invoke_capability(
+            "config.write",
+            "update_route",
+            {"umo": umo, "conf_id": conf_id},
+        )
+        self.umop_to_conf_id[umo] = conf_id
+
+    async def delete_route(self, umo: Any) -> None:
+        """Delete one route on the Host and mirror it locally.
+
+        Raises:
+            ValueError: The umo format is invalid.
+        """
+        umo = _umo_str(umo)
+        if umo is None or self._split_umo(umo) is None:
+            raise ValueError(
+                "umop must be a string in the format "
+                "[platform_id]:[message_type]:[session_id], with optional "
+                "wildcards * or empty for all",
+            )
+        await self._facade_context._ctx._invoke_capability(
+            "config.write",
+            "delete_route",
+            {"umo": umo},
+        )
+        self.umop_to_conf_id.pop(umo, None)
+
+
+class AstrbotConfigMgrFacade:
+    """Legacy astrbot_config_mgr served from the handshake snapshot."""
+
+    def __init__(self, facade_context: Any, snapshot: dict) -> None:
+        """Build the facade from the handshake snapshot."""
+        self._facade_context = facade_context
+        self._snapshot = snapshot
+        self.confs: dict[str, GlobalConfig] = {
+            "default": copy_global_config(snapshot, None),
+        }
+        self.ucr = UcrFacade(facade_context, snapshot)
+
+    @property
+    def default_conf(self) -> GlobalConfig:
+        """Return the default config profile."""
+        return self.confs["default"]
+
+    def get_conf(self, umo: Any) -> GlobalConfig:
+        """Return the config profile routed for one umo."""
+        return copy_global_config(self._snapshot, _umo_str(umo))
+
+    def get_conf_list(self) -> list[dict]:
+        """Return metadata of all config profiles (including default)."""
+        return [dict(item) for item in self._snapshot.get("config_list") or []]
+
+    def get_conf_info(self, umo: Any) -> dict:
+        """Return the metadata of the config profile routed for one umo."""
+        conf_id = self.ucr.get_conf_id_for_umop(umo) or "default"
+        fallback: dict = {"id": "default", "name": "default", "path": ""}
+        for item in self._snapshot.get("config_list") or []:
+            if item.get("id") == conf_id:
+                return dict(item)
+            if item.get("id") == "default":
+                fallback = dict(item)
+        return fallback

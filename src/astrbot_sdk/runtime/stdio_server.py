@@ -348,6 +348,20 @@ class StdioPluginServer:
                 payload,
             )
             return encode_value(result)
+        if frame.method == "invoke_cron":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            invoker = getattr(self.loaded_plugin, "invoke_cron", None)
+            if invoker is None:
+                raise InvalidRequest("plugin does not support cron handlers")
+            payload = decode_value(frame.params.get("payload", {}))
+            if not isinstance(payload, Mapping):
+                raise InvalidRequest("cron payload must be an object")
+            result = await invoker(
+                str(frame.params["handler_id"]),
+                payload,
+            )
+            return encode_value(result)
         if frame.method == "session_consider":
             event = decode_value(frame.params.get("event"))
             if not isinstance(event, MessageEvent):

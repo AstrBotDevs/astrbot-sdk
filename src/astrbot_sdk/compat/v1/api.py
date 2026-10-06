@@ -342,6 +342,7 @@ def install(host_version: str | None = None) -> None:
     entities_mod.ProviderType = provider.ProviderType
     entities_mod.EmbeddingProvider = provider.Provider
     entities_mod.TokenUsage = _ShellRecord
+    entities_mod.ToolCallsResult = _ShellRecord
 
     conversation_mgr_mod = ModuleType("astrbot.core.conversation_mgr")
     from .conversation import ConversationManager
@@ -351,6 +352,39 @@ def install(host_version: str | None = None) -> None:
 
     agent_hooks_mod = ModuleType("astrbot.core.agent.hooks")
     agent_hooks_mod.BaseAgentRunHooks = _ShellRecord
+
+    # Plugins importing CronMessageEvent universally construct it and push it
+    # into the Host event queue (event injection), which isolated plugins
+    # cannot do. Keep the import working so the plugin loads; constructing the
+    # event fails loudly at the injection site.
+    class CronMessageEvent:  # noqa: D101
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            from .errors import IsolationUnsupportedError
+
+            raise IsolationUnsupportedError(
+                "CronMessageEvent event injection is unavailable in isolated "
+                "legacy mode; plugins needing it must run in-process"
+            )
+
+    cron_pkg = _namespace_package("astrbot.core.cron")
+    cron_events_mod = ModuleType("astrbot.core.cron.events")
+    cron_events_mod.CronMessageEvent = CronMessageEvent
+
+    # Same exclusion category: building a Host main agent inside the plugin
+    # process (proactive agent turns). Symbols stay importable so the plugin
+    # loads; calling them fails loudly.
+    tools_pkg = _namespace_package("astrbot.core.tools")
+    message_tools_mod = ModuleType("astrbot.core.tools.message_tools")
+    message_tools_mod.SendMessageToUserTool = _ShellRecord
+
+    astr_main_agent_mod = ModuleType("astrbot.core.astr_main_agent")
+    astr_main_agent_mod.MainAgentBuildConfig = _ShellRecord
+    astr_main_agent_mod.build_main_agent = _unsupported(
+        "build_main_agent (proactive in-plugin agent)"
+    )
+    astr_main_agent_mod._get_session_conv = _unsupported(
+        "_get_session_conv (proactive in-plugin agent)"
+    )
 
     regex_filter_mod = ModuleType("astrbot.core.star.filter.regex")
     regex_filter_mod.RegexFilter = event.RegexFilter
@@ -802,6 +836,11 @@ def install(host_version: str | None = None) -> None:
     # Some plugins import through the historical "entites" typo path.
     sys.modules["astrbot.core.provider.entites"] = entities_mod
     sys.modules["astrbot.core.conversation_mgr"] = conversation_mgr_mod
+    sys.modules["astrbot.core.cron"] = cron_pkg
+    sys.modules["astrbot.core.cron.events"] = cron_events_mod
+    sys.modules["astrbot.core.tools"] = tools_pkg
+    sys.modules["astrbot.core.tools.message_tools"] = message_tools_mod
+    sys.modules["astrbot.core.astr_main_agent"] = astr_main_agent_mod
     sys.modules["astrbot.core.agent.hooks"] = agent_hooks_mod
     sys.modules["astrbot.core.star.filter.regex"] = regex_filter_mod
     sys.modules["astrbot.core.message"] = _namespace_package("astrbot.core.message")
@@ -833,6 +872,16 @@ def install(host_version: str | None = None) -> None:
     sys.modules["astrbot.core.utils.media_utils"] = _utils_media_utils_mod()
     sys.modules["astrbot.core.utils.astrbot_path"] = astrbot_path_mod
     sys.modules["astrbot.core.utils.session_waiter"] = session_waiter_mod
+    history_saver_mod = ModuleType("astrbot.core.utils.history_saver")
+    history_saver_mod.persist_agent_history = _unsupported(
+        "persist_agent_history (proactive in-plugin agent)"
+    )
+    sys.modules["astrbot.core.utils.history_saver"] = history_saver_mod
+    config_number_mod = ModuleType("astrbot.core.utils.config_number")
+    from .utils import coerce_int_config
+
+    config_number_mod.coerce_int_config = coerce_int_config
+    sys.modules["astrbot.core.utils.config_number"] = config_number_mod
 
     # Loudly block the real Host internals; the Runner shares the core venv,
     # so astrbot.core would import successfully without this.

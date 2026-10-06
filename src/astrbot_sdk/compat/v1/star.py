@@ -60,7 +60,15 @@ class Context:
         self._web_routes: list = []
         self.logger = ctx.logger
         from .conversation import ConversationManager
-        from .host_snapshot import PersonaManagerFacade, ProviderManagerFacade
+        from .cron import CronManagerFacade
+        from .host_snapshot import (
+            AstrbotConfigMgrFacade,
+            PersonaManagerFacade,
+            PlatformManagerFacade,
+            ProviderManagerFacade,
+        )
+        from .kb import KbManagerFacade
+        from .message_history import MessageHistoryManagerFacade
 
         self.conversation_manager = ConversationManager(ctx)
         self._persona_manager = PersonaManagerFacade(ctx, self._snapshot)
@@ -69,6 +77,11 @@ class Context:
             self._snapshot,
             self._persona_manager,
         )
+        self.platform_manager = PlatformManagerFacade(self, self._snapshot)
+        self.astrbot_config_mgr = AstrbotConfigMgrFacade(self, self._snapshot)
+        self.kb_manager = KbManagerFacade(self)
+        self.cron_manager = CronManagerFacade(self)
+        self.message_history_manager = MessageHistoryManagerFacade(self)
 
     @property
     def persona_manager(self) -> Any:
@@ -309,17 +322,32 @@ class Context:
             "get_event_queue is unavailable in isolated legacy mode"
         )
 
-    def get_platform(self, *args: Any, **kwargs: Any) -> Any:
-        """Platform adapters are host-internal (unsupported)."""
-        raise IsolationUnsupportedError(
-            "get_platform is unavailable in isolated legacy mode"
-        )
+    def get_platform(self, platform_type: Any) -> Any:
+        """Return the first platform adapter matching the given type name.
 
-    def get_platform_inst(self, *args: Any, **kwargs: Any) -> Any:
-        """Platform adapters are host-internal (unsupported)."""
-        raise IsolationUnsupportedError(
-            "get_platform_inst is unavailable in isolated legacy mode"
-        )
+        Mirrors the deprecated in-process getter: string names match the
+        adapter metadata name. Enum-based PlatformAdapterType matching is
+        unavailable in isolated mode.
+
+        Raises:
+            IsolationUnsupportedError: A non-string platform type is passed.
+        """
+        if not isinstance(platform_type, str):
+            raise IsolationUnsupportedError(
+                "get_platform with a PlatformAdapterType is unavailable in "
+                "isolated legacy mode; pass the adapter name string instead."
+            )
+        for platform in self.platform_manager.platform_insts:
+            if platform.meta().name == platform_type:
+                return platform
+        return None
+
+    def get_platform_inst(self, platform_id: str) -> Any:
+        """Return the platform adapter facade with the given instance ID."""
+        for platform in self.platform_manager.platform_insts:
+            if platform.meta().id == platform_id:
+                return platform
+        return None
 
     def get_db(self) -> Any:
         """The host database is host-internal (unsupported)."""

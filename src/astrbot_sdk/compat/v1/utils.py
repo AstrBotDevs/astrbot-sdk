@@ -180,6 +180,58 @@ class SessionLockManager:
 session_lock_manager = SessionLockManager()
 
 
+def coerce_int_config(
+    value: object,
+    *,
+    default: int,
+    min_value: int | None = None,
+    field_name: str | None = None,
+    source: str = "config",
+    warn: bool = True,
+) -> int:
+    """Coerce a config value to int, mirroring the Host helper.
+
+    Args:
+        value: Raw config value.
+        default: Fallback when coercion fails.
+        min_value: Optional lower bound; values below fall back to default.
+        field_name: Field label used in warnings.
+        source: Source label used in warnings.
+        warn: Whether to log a warning on fallback.
+
+    Returns:
+        The coerced int, or default on failure.
+    """
+    import logging
+
+    label = f"'{field_name}'" if field_name else "value"
+    parsed: int
+    ok = True
+    if isinstance(value, bool):
+        parsed = default
+        ok = False
+    elif isinstance(value, int):
+        parsed = value
+    else:
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            parsed = default
+            ok = False
+    if ok and min_value is not None and parsed < min_value:
+        parsed = default
+        ok = False
+    if not ok and warn:
+        logging.getLogger("astrbot_sdk.compat").warning(
+            "%s %s should be numeric, got %r. Fallback to %s.",
+            source,
+            label,
+            value,
+            default,
+        )
+    return parsed
+
+
 def is_file_uri(value: object) -> bool:
     """Return whether a value is a ``file:`` URI."""
     if not isinstance(value, str):

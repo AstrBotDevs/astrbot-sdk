@@ -26,9 +26,22 @@ PLATFORM_RAW_CAPABILITY = "platform.raw"
 class LegacyBotApiProxy:
     """OneBot-style ``bot.api`` object forwarding call_action to the Host."""
 
-    def __init__(self, event: MessageEvent, context: Any) -> None:
-        self._event = event
+    def __init__(self, context: Any, platform_id: str, platform_type: str) -> None:
+        """Initialize the proxy.
+
+        Args:
+            context: Legacy facade context used to reach the Host.
+            platform_id: Host platform instance ID to address.
+            platform_type: Platform metadata name of the instance.
+        """
         self._context = context
+        self._platform_id = platform_id
+        self._platform_type = platform_type
+
+    @classmethod
+    def from_event(cls, event: MessageEvent, context: Any) -> LegacyBotApiProxy:
+        """Build a proxy bound to the platform of one event."""
+        return cls(context, event.umo.platform_id, event.platform_type)
 
     async def call_action(self, action: str, **params: Any) -> Any:
         """Forward one raw platform action to the Host-side adapter.
@@ -44,8 +57,8 @@ class LegacyBotApiProxy:
             PLATFORM_RAW_CAPABILITY,
             "call_action",
             {
-                "platform_id": self._event.umo.platform_id,
-                "platform": self._event.platform_type,
+                "platform_id": self._platform_id,
+                "platform": self._platform_type,
                 "action": action,
                 "params": params,
             },
@@ -55,10 +68,21 @@ class LegacyBotApiProxy:
 class LegacyBotProxy:
     """Dynamic bot client mirroring aiocqhttp's CQHttp method surface."""
 
-    def __init__(self, event: MessageEvent, context: Any) -> None:
-        self._event = event
+    def __init__(self, context: Any, platform_id: str, platform_type: str) -> None:
+        """Initialize the proxy.
+
+        Args:
+            context: Legacy facade context used to reach the Host.
+            platform_id: Host platform instance ID to address.
+            platform_type: Platform metadata name of the instance.
+        """
         self._context = context
-        self.api = LegacyBotApiProxy(event, context)
+        self.api = LegacyBotApiProxy(context, platform_id, platform_type)
+
+    @classmethod
+    def from_event(cls, event: MessageEvent, context: Any) -> LegacyBotProxy:
+        """Build a proxy bound to the platform of one event."""
+        return cls(context, event.umo.platform_id, event.platform_type)
 
     def __getattr__(self, name: str) -> Any:
         # Mirror CQHttp: unknown attributes become async kwargs-only raw
@@ -77,7 +101,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
     @classmethod
     async def send_message(cls, *args: Any, **kwargs: Any) -> None:
@@ -97,7 +121,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class QQOfficialWebhookMessageEvent(QQOfficialMessageEvent):
@@ -109,7 +133,7 @@ class TelegramPlatformEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class LarkMessageEvent(AstrMessageEvent):
@@ -117,7 +141,7 @@ class LarkMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class DiscordPlatformEvent(AstrMessageEvent):
@@ -125,7 +149,7 @@ class DiscordPlatformEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class DingtalkMessageEvent(AstrMessageEvent):
@@ -133,7 +157,7 @@ class DingtalkMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class SlackMessageEvent(AstrMessageEvent):
@@ -141,7 +165,7 @@ class SlackMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 class WebChatMessageEvent(AstrMessageEvent):
@@ -149,7 +173,7 @@ class WebChatMessageEvent(AstrMessageEvent):
 
     @property
     def bot(self) -> LegacyBotProxy:
-        return LegacyBotProxy(self._event, self._context)
+        return LegacyBotProxy.from_event(self._event, self._context)
 
 
 #: Event class chosen by the event's platform name so isinstance checks in

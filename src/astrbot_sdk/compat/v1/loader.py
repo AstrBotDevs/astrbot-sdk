@@ -170,6 +170,22 @@ class CompatLoadedPlugin:
             )
         return await registration.handler(call, **dict(args))
 
+    async def invoke_cron(self, handler_id: str, payload: Any) -> Any:
+        """Invoke one legacy cron job handler and return its result."""
+        import inspect
+
+        handler = self.sdk_ctx.cron_handlers.get(handler_id)
+        if handler is None:
+            from ...errors import InvalidRequest
+
+            raise InvalidRequest(f"unknown cron handler: {handler_id}")
+        args = dict(payload.get("args") or ())
+        kwargs = dict(payload.get("kwargs") or {})
+        result = handler(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     async def invoke_web(self, request: Any) -> AsyncIterator[dict]:
         """Invoke one legacy register_web_api handler."""
         from ...errors import InvalidRequest, NotFound

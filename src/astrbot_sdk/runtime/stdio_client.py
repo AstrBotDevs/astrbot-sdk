@@ -525,6 +525,25 @@ class StdioPluginClient:
         )
         return decode_value(result)
 
+    async def invoke_cron(self, handler_id: str, payload: Mapping[str, Any]) -> Any:
+        """Invoke one remote cron job handler and return its result.
+
+        Args:
+            handler_id: Registered cron handler ID.
+            payload: Job payload forwarded to the plugin handler.
+
+        Returns:
+            Decoded handler result.
+        """
+        result = await self._request(
+            "invoke_cron",
+            {
+                "handler_id": handler_id,
+                "payload": encode_value(dict(payload)),
+            },
+        )
+        return decode_value(result)
+
     async def ping(self) -> Any:
         """Probe Runner liveness; returns its protocol version payload."""
         return await self._request("ping", {})

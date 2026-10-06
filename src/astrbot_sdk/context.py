@@ -78,6 +78,10 @@ class PluginContext[ConfigT]:
         default_factory=dict,
         repr=False,
     )
+    cron_handlers: dict[str, Callable[..., Any]] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         # Build stable Host service facades. Services never disappear from the

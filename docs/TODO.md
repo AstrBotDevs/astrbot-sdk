@@ -261,6 +261,35 @@
   `persona.write` 能力（仅 legacy）转发，Host 只改内存 personas_v3
   不落盘；persona CRUD（增删 persona）本轮抛
   IsolationUnsupportedError，等正式 personas 能力设计。
+- [x] 旧版兼容层 manager facades（2026-10-06）：Context 上的 manager
+  类对象全部落地——`platform_manager`（platform_insts/meta()/get_client()/
+  bot；`event_queue` 属性抛 IsolationUnsupportedError）、
+  `astrbot_config_mgr`（confs/default_conf/get_conf(umo)/get_conf_list/
+  get_conf_info + `.ucr` 路由增删走 config.write RPC 并本地镜像）、
+  `cron_manager`（add_basic_job/delete_job/list_jobs 走 `cron.schedule`
+  RPC，handler 经 invoke_cron 帧回调插件进程；`SchedulerFacade.add_job`
+  同步 fire-and-forget 对齐进程内语义，支持字符串别名/Date/Cron/
+  Interval trigger 序列化）、`kb_manager`（list/get/create/delete/retrieve
+  走 `kb` RPC；KbHelper 文档操作不 RPC）、`message_history_manager`
+  （7 个操作走 `message.history` RPC）。读路径全部握手快照同步服务，
+  写/操作方法透明 RPC 代理（用户拍板形状）。三个新 capability
+  （cron.schedule/kb/message.history）均仅 legacy 可声明。
+  **降级决策**：`ProviderManagerFacade.register_provider_change_hook`
+  接受注册、告警一次、永不触发（standalone_profile 自带 reconcile
+  可正常降级）；快照冻结限制同 Context 快照接口条目。
+  **设计排除（事件注入类）**：rokid_bridge（自定义 Platform 适配器需
+  event_queue）、smart_followup/image_generation/alipay_website（构造
+  CronMessageEvent 注入 event_queue 的主动唤醒）。后三者相关 import
+  （cron.events/tools.message_tools/astr_main_agent/utils.history_saver/
+  entities.ToolCallsResult）已加 shim——插件可加载，走到注入点
+  响亮报错。utils.config_number（coerce_int_config）为纯函数，
+  compat 本地复刻。五轮复扫（同日，1966 ok / 418 fail，82.5%）：
+  本轮 12 个恢复（rss_tool/bookkeeper/redpacket_notify/gcard_keeper/
+  standalone_profile/staging_sync/smart_followup/image_generation/
+  alipay_website/live_stream_companion/shutup_when_muted/tg_button）；
+  31 个命中改动面的既有通过插件抽样复测零回退
+  （event.bot.api/platform_manager/cron/history/kb/config_mgr/
+  change_hook 各路径）。
 - [ ] 旧版兼容层 P3（长尾，按需）：`astrbot.api.web` 路由
   （等 web 能力设计）、`EmbeddingProvider` 等类型外观的剩余零散项、
   `star_handlers_registry` 等注册表内省（当前降级为空）、
