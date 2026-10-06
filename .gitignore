@@ -6,12 +6,7 @@ dist/
 .DS_Store
 
 # runtime artifacts from local plugin runs
-plugins/
-stickers/
 plugin_data/
 config.json
-dpcq_data/
-smart_memory/
-werewolf_temp/
 /data/*
 !/data/sdk-plugins/
