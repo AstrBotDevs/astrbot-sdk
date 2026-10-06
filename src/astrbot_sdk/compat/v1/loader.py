@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import re
 import sys
 from collections.abc import AsyncIterator, Mapping
@@ -709,6 +710,32 @@ def _wrap_handler(
     return wrapper
 
 
+def _resolve_astrbot_root(plugin_root: Path) -> Path | None:
+    """Locate the AstrBot project root that contains the data directory.
+
+    Prefers ASTRBOT_DATA_PATH (set by the Host for runner subprocesses) and
+    falls back to the ``<root>/data/plugins/<plugin>`` directory convention.
+
+    Args:
+        plugin_root: Resolved plugin directory.
+
+    Returns:
+        The AstrBot project root, or None when the layout is unrecognized
+        (the caller then falls back to a synthetic import namespace).
+    """
+    data_path = os.environ.get("ASTRBOT_DATA_PATH")
+    if data_path:
+        candidate = Path(data_path).resolve().parent
+        if (candidate / "data").is_dir():
+            return candidate
+    if (
+        plugin_root.parent.name == "plugins"
+        and plugin_root.parent.parent.name == "data"
+    ):
+        return plugin_root.parents[2]
+    return None
+
+
 def load_legacy_plugin(
     plugin_root: str | Path,
     *,
@@ -734,8 +761,6 @@ def load_legacy_plugin(
         PluginImportError: The plugin cannot be imported.
         InvalidPluginDefinition: The plugin definition is unsupported.
     """
-    from ...runtime.loader import _install_namespace
-
     root = Path(plugin_root).resolve()
     metadata = _load_legacy_metadata(root)
 
@@ -744,9 +769,26 @@ def load_legacy_plugin(
         version = host_info.get("version")
         host_version = str(version) if version else None
     compat_api.install(host_version=host_version)
-    namespace = _install_namespace(root)
-    module_name = f"{namespace}.main"
+    # Multiprocessing spawn children are fresh interpreters; this env flag lets
+    # astrbot_sdk.runtime.__main__ reinstall the shims during spawn fixup.
+    os.environ.setdefault("ASTRBOT_SDK_LEGACY_RUNNER", "1")
+    if host_version:
+        os.environ.setdefault("ASTRBOT_HOST_VERSION", host_version)
     import importlib
+
+    # Mirror the in-process loader: import as data.plugins.<dir>.main so module
+    # identity (__name__, ModuleSpec, __package__) is byte-for-byte identical.
+    # Framework introspection (Flask/Quart instance paths, importlib.resources)
+    # and spawned multiprocessing children depend on the real dotted path.
+    package = f"data.plugins.{root.name}"
+    astrbot_root = _resolve_astrbot_root(root)
+    namespace = None
+    if astrbot_root is None:
+        from ...runtime.loader import _install_namespace
+
+        namespace = _install_namespace(root)
+        package = namespace
+    module_name = f"{package}.main"
 
     # Bind the legacy facades before any plugin code runs: plugins may touch
     # StarTools/sp/html_renderer at module import time (top-level statements
@@ -771,24 +813,37 @@ def load_legacy_plugin(
     # in-process loader keeps plugin dirs on sys.path, so mirror that.
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    init_file = root / "__init__.py"
-    if init_file.is_file() and not getattr(
-        sys.modules[namespace],
-        "__astrbot_init_loaded__",
-        False,
-    ):
-        # Execute the plugin's package __init__ as the namespace package code.
-        sys.modules[namespace].__dict__.setdefault("__file__", str(init_file))
-        code = compile(init_file.read_bytes(), str(init_file), "exec")
-        exec(code, sys.modules[namespace].__dict__)
-        sys.modules[namespace].__astrbot_init_loaded__ = True
+    if namespace is not None:
+        # Synthetic namespace fallback: execute the package __init__ manually
+        # (the real import machinery handles it in the mirrored branch).
+        init_file = root / "__init__.py"
+        if init_file.is_file() and not getattr(
+            sys.modules[namespace],
+            "__astrbot_init_loaded__",
+            False,
+        ):
+            sys.modules[namespace].__dict__.setdefault("__file__", str(init_file))
+            code = compile(init_file.read_bytes(), str(init_file), "exec")
+            exec(code, sys.modules[namespace].__dict__)
+            sys.modules[namespace].__astrbot_init_loaded__ = True
+    else:
+        if str(astrbot_root) not in sys.path:
+            sys.path.insert(0, str(astrbot_root))
+        # Drop stale modules so a reload re-executes the package code,
+        # mirroring the in-process loader.
+        for name in [
+            item
+            for item in tuple(sys.modules)
+            if item == package or item.startswith(f"{package}.")
+        ]:
+            del sys.modules[name]
     importlib.invalidate_caches()
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
         raise PluginImportError(f"failed to import legacy plugin: {exc}") from exc
 
-    star_class = _find_star_class(module, namespace)
+    star_class = _find_star_class(module, package)
     declared = getattr(star_class, "__astrbot_register__", None)
     if declared and not metadata.desc:
         # The in-process loader prioritizes metadata.yaml over the deprecated
