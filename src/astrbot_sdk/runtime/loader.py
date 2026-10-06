@@ -144,14 +144,20 @@ def _install_namespace(plugin_root: Path) -> str:
     if namespace in sys.modules:
         return namespace
 
+    init_file = plugin_root / "__init__.py"
     module = ModuleType(namespace)
     module.__path__ = [str(plugin_root)]  # type: ignore[attr-defined]
     module.__package__ = namespace
     module.__spec__ = importlib.machinery.ModuleSpec(
         namespace,
         loader=None,
+        # Mirror a real package spec: frameworks that introspect importlib
+        # metadata (e.g. Flask/Quart instance-path discovery) break on a
+        # spec without origin and search locations.
+        origin=str(init_file) if init_file.is_file() else "namespace",
         is_package=True,
     )
+    module.__spec__.submodule_search_locations = [str(plugin_root)]
     sys.modules[namespace] = module
     return namespace
 

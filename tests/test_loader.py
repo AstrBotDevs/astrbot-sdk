@@ -179,6 +179,42 @@ class TestPlugin(Plugin):
     assert loaded.get_handler("value").spec.path == "value"
 
 
+def test_namespace_spec_mirrors_real_package(tmp_path: Path) -> None:
+    # Flask/Quart instance-path discovery introspects importlib metadata of the
+    # plugin's root module; a spec without origin/search locations breaks it.
+    import sys
+
+    from astrbot_sdk.runtime.loader import _install_namespace
+
+    plugin_root = tmp_path / "spec_plugin"
+    write_plugin(
+        plugin_root,
+        """
+from astrbot_sdk import Plugin
+
+class TestPlugin(Plugin):
+    pass
+""",
+    )
+
+    namespace = _install_namespace(plugin_root)
+    spec = sys.modules[namespace].__spec__
+
+    assert spec is not None
+    assert list(spec.submodule_search_locations or []) == [str(plugin_root)]
+    # No __init__.py: the namespace package convention flask understands.
+    assert spec.origin == "namespace"
+
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    sys.modules.pop(namespace, None)
+
+    namespace = _install_namespace(plugin_root)
+    spec = sys.modules[namespace].__spec__
+
+    assert spec is not None
+    assert spec.origin == str(plugin_root / "__init__.py")
+
+
 def test_required_capability_must_be_granted(tmp_path: Path) -> None:
     plugin_root = tmp_path / "required_capability"
     write_plugin(
