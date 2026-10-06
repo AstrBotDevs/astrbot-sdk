@@ -162,6 +162,87 @@ def _install_namespace(plugin_root: Path) -> str:
     return namespace
 
 
+VIRTUAL_PLUGIN_PARENTS_ENV = "ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS"
+
+
+def _anchor_virtual_parent(parent: str) -> None:
+    """Anchor one plugin parent directory under ``data.plugins``.
+
+    Prefers a real ``data``/``data.plugins`` package when one is importable
+    and only creates in-memory namespace packages as a fallback, so mirrored
+    (local) and virtual (remote) layouts can coexist in one interpreter.
+    """
+    data = sys.modules.get("data")
+    if data is None:
+        try:
+            data = importlib.import_module("data")
+        except ImportError:
+            data = ModuleType("data")
+            data.__path__ = []  # type: ignore[attr-defined]
+            data.__spec__ = importlib.machinery.ModuleSpec(
+                "data", loader=None, is_package=True
+            )
+            sys.modules["data"] = data
+    plugins = sys.modules.get("data.plugins")
+    if plugins is None:
+        try:
+            plugins = importlib.import_module("data.plugins")
+        except ImportError:
+            plugins = ModuleType("data.plugins")
+            plugins.__package__ = "data.plugins"
+            plugins.__path__ = []  # type: ignore[attr-defined]
+            plugins.__spec__ = importlib.machinery.ModuleSpec(
+                "data.plugins", loader=None, is_package=True
+            )
+            sys.modules["data.plugins"] = plugins
+            data.plugins = plugins  # type: ignore[attr-defined]
+    paths = list(getattr(plugins, "__path__", None) or [])
+    if parent not in paths:
+        # Reassign instead of append: real namespace packages expose a
+        # read-only _NamespacePath.
+        plugins.__path__ = [*paths, parent]  # type: ignore[attr-defined]
+
+
+def install_virtual_plugin_root(plugin_root: Path) -> str:
+    """Anchor ``data.plugins.<dir>`` resolution without an AstrBot root.
+
+    Remote runners have no AstrBot checkout on disk, so the real dotted
+    path cannot resolve through sys.path. Point a namespace package at the
+    plugin's real parent directory instead, preserving the
+    ``data.plugins.<dir>`` module identity that framework introspection
+    (Flask/Quart instance paths, importlib.resources) and multiprocessing
+    spawn children rely on. The parent directory is recorded in
+    VIRTUAL_PLUGIN_PARENTS_ENV because spawn children are fresh
+    interpreters: they inherit env vars but not sys.modules.
+
+    Args:
+        plugin_root: Resolved plugin directory.
+
+    Returns:
+        The dotted package name of the plugin (``data.plugins.<dir>``).
+    """
+    parent = str(plugin_root.parent)
+    _anchor_virtual_parent(parent)
+    recorded = os.environ.get(VIRTUAL_PLUGIN_PARENTS_ENV, "")
+    if parent not in recorded.split(os.pathsep):
+        os.environ[VIRTUAL_PLUGIN_PARENTS_ENV] = (
+            f"{recorded}{os.pathsep}{parent}" if recorded else parent
+        )
+    return f"data.plugins.{plugin_root.name}"
+
+
+def reinstall_virtual_plugin_roots_from_env() -> None:
+    """Re-anchor virtual plugin roots in a fresh interpreter.
+
+    multiprocessing spawn children inherit environment variables but not
+    sys.modules; ``runtime.__main__`` calls this during spawn fixup.
+    """
+    recorded = os.environ.get(VIRTUAL_PLUGIN_PARENTS_ENV, "")
+    for parent in recorded.split(os.pathsep):
+        if parent:
+            _anchor_virtual_parent(parent)
+
+
 def _resolve_entrypoint(
     metadata: PluginMetadata,
     plugin_root: Path,

@@ -721,7 +721,7 @@ def _resolve_astrbot_root(plugin_root: Path) -> Path | None:
 
     Returns:
         The AstrBot project root, or None when the layout is unrecognized
-        (the caller then falls back to a synthetic import namespace).
+        (the caller then anchors a virtual plugin root instead).
     """
     data_path = os.environ.get("ASTRBOT_DATA_PATH")
     if data_path:
@@ -782,12 +782,15 @@ def load_legacy_plugin(
     # and spawned multiprocessing children depend on the real dotted path.
     package = f"data.plugins.{root.name}"
     astrbot_root = _resolve_astrbot_root(root)
-    namespace = None
-    if astrbot_root is None:
-        from ...runtime.loader import _install_namespace
+    if astrbot_root is not None:
+        if str(astrbot_root) not in sys.path:
+            sys.path.insert(0, str(astrbot_root))
+    else:
+        # Remote runner: no AstrBot root on disk. Anchor the same dotted
+        # path through an in-memory namespace package instead.
+        from ...runtime.loader import install_virtual_plugin_root
 
-        namespace = _install_namespace(root)
-        package = namespace
+        install_virtual_plugin_root(root)
     module_name = f"{package}.main"
 
     # Bind the legacy facades before any plugin code runs: plugins may touch
@@ -813,30 +816,14 @@ def load_legacy_plugin(
     # in-process loader keeps plugin dirs on sys.path, so mirror that.
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    if namespace is not None:
-        # Synthetic namespace fallback: execute the package __init__ manually
-        # (the real import machinery handles it in the mirrored branch).
-        init_file = root / "__init__.py"
-        if init_file.is_file() and not getattr(
-            sys.modules[namespace],
-            "__astrbot_init_loaded__",
-            False,
-        ):
-            sys.modules[namespace].__dict__.setdefault("__file__", str(init_file))
-            code = compile(init_file.read_bytes(), str(init_file), "exec")
-            exec(code, sys.modules[namespace].__dict__)
-            sys.modules[namespace].__astrbot_init_loaded__ = True
-    else:
-        if str(astrbot_root) not in sys.path:
-            sys.path.insert(0, str(astrbot_root))
-        # Drop stale modules so a reload re-executes the package code,
-        # mirroring the in-process loader.
-        for name in [
-            item
-            for item in tuple(sys.modules)
-            if item == package or item.startswith(f"{package}.")
-        ]:
-            del sys.modules[name]
+    # Drop stale modules so a reload re-executes the package code,
+    # mirroring the in-process loader.
+    for name in [
+        item
+        for item in tuple(sys.modules)
+        if item == package or item.startswith(f"{package}.")
+    ]:
+        del sys.modules[name]
     importlib.invalidate_caches()
     try:
         module = importlib.import_module(module_name)

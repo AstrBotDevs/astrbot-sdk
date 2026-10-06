@@ -16,6 +16,11 @@ if __name__ != "__main__" and os.environ.get("ASTRBOT_SDK_LEGACY_RUNNER") == "1"
     from ..compat.v1.api import install as _install_legacy_api
 
     _install_legacy_api(host_version=os.environ.get("ASTRBOT_HOST_VERSION") or None)
+    # Fresh interpreters do not inherit sys.modules; rebuild the parent's
+    # virtual data.plugins anchors so the plugin module resolves by name.
+    from .loader import reinstall_virtual_plugin_roots_from_env
+
+    reinstall_virtual_plugin_roots_from_env()
 
 
 def main() -> None:

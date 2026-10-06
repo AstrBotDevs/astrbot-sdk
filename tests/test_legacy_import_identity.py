@@ -57,6 +57,7 @@ def plugin_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # so the loader's own os.environ.setdefault would leak into this process.
     os.environ.pop("ASTRBOT_SDK_LEGACY_RUNNER", None)
     os.environ.pop("ASTRBOT_HOST_VERSION", None)
+    os.environ.pop("ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS", None)
     for name in [
         item
         for item in tuple(sys.modules)
@@ -136,3 +137,69 @@ def test_shims_are_not_installed_without_runner_flag(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "real" in result.stdout
+
+
+@pytest.fixture()
+def remote_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Plugin outside any data/plugins layout (remote runner scenario)."""
+    monkeypatch.delenv("ASTRBOT_DATA_PATH", raising=False)
+    monkeypatch.delenv("ASTRBOT_SDK_LEGACY_RUNNER", raising=False)
+    monkeypatch.delenv("ASTRBOT_HOST_VERSION", raising=False)
+    monkeypatch.delenv("ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS", raising=False)
+    plugin_root = tmp_path / "elsewhere" / PLUGIN_NAME
+    ctx = SimpleNamespace(logger=logging.getLogger("test"))
+    yield plugin_root, ctx
+    os.environ.pop("ASTRBOT_SDK_LEGACY_RUNNER", None)
+    os.environ.pop("ASTRBOT_HOST_VERSION", None)
+    os.environ.pop("ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS", None)
+    for name in [
+        item
+        for item in tuple(sys.modules)
+        if item == "data" or item.startswith("data.")
+    ]:
+        sys.modules.pop(name, None)
+
+
+def test_virtual_root_import_without_astrbot_layout(remote_env) -> None:
+    """No AstrBot root on disk: the same dotted path resolves via a virtual
+    namespace package anchored at the plugin's real parent directory."""
+    plugin_root, ctx = remote_env
+    _write_plugin(plugin_root)
+
+    load_legacy_plugin(plugin_root, ctx=ctx)
+
+    module = sys.modules[f"data.plugins.{PLUGIN_NAME}.main"]
+    assert module.VALUE == 1
+    # Real import machinery ran: __file__ is the actual source file.
+    assert module.__file__ == str(plugin_root / "main.py")
+    assert sys.modules[f"data.plugins.{PLUGIN_NAME}.helper"].VALUE == 1
+    # The parent dir is recorded so multiprocessing spawn children can
+    # re-anchor themselves (they inherit env, not sys.modules).
+    recorded = os.environ["ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS"]
+    assert str(plugin_root.parent) in recorded.split(os.pathsep)
+
+
+def test_spawn_child_reanchors_virtual_roots(tmp_path: Path) -> None:
+    """multiprocessing spawn children rebuild virtual anchors from the env."""
+    plugin_root = tmp_path / "elsewhere" / PLUGIN_NAME
+    _write_plugin(plugin_root)
+    code = (
+        "import os; "
+        "os.environ['ASTRBOT_SDK_LEGACY_RUNNER'] = '1'; "
+        f"os.environ['ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS'] = {str(plugin_root.parent)!r}; "
+        "import astrbot_sdk.runtime.__main__; "
+        "import importlib; "
+        # helper.py is self-contained (no astrbot imports), so importing it
+        # through the re-anchored namespace proves the anchor works.
+        f"mod = importlib.import_module('data.plugins.{PLUGIN_NAME}.helper'); "
+        "print('anchored' if mod.VALUE == 1 else 'missing')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "anchored" in result.stdout
