@@ -6,6 +6,7 @@ the old provider API as a thin proxy over the plugin's ``ctx.llm`` service.
 
 from __future__ import annotations
 
+import enum
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -19,17 +20,38 @@ class Personality(dict):
     """Legacy personality record (a plain dict in practice)."""
 
 
-class ProviderType:
-    """Legacy provider type marker kept for isinstance-free imports."""
+class ProviderType(enum.Enum):
+    """Legacy provider type enum mirroring the core values."""
+
+    CHAT_COMPLETION = "chat_completion"
+    SPEECH_TO_TEXT = "speech_to_text"
+    TEXT_TO_SPEECH = "text_to_speech"
+    EMBEDDING = "embedding"
+    RERANK = "rerank"
+
+
+_LEGACY_TYPE_BY_KIND = {
+    ProviderKind.CHAT: ProviderType.CHAT_COMPLETION,
+    ProviderKind.SPEECH_TO_TEXT: ProviderType.SPEECH_TO_TEXT,
+    ProviderKind.TEXT_TO_SPEECH: ProviderType.TEXT_TO_SPEECH,
+    ProviderKind.EMBEDDING: ProviderType.EMBEDDING,
+}
 
 
 class ProviderMetaData:
-    """Legacy provider metadata triple (id, model, type)."""
+    """Legacy provider metadata (id, model, type, provider_type)."""
 
-    def __init__(self, id: str, model: str | None = None, type: str = "") -> None:
+    def __init__(
+        self,
+        id: str,
+        model: str | None = None,
+        type: str = "",
+        provider_type: ProviderType | None = None,
+    ) -> None:
         self.id = id
         self.model = model
         self.type = type
+        self.provider_type = provider_type
 
 
 class ProviderRequest:
@@ -197,11 +219,12 @@ class Provider:
         ctx: Any,
         provider_id: str | None = None,
         umo: Any = None,
+        info: Any = None,
     ) -> None:
         self._ctx = ctx
         self._provider_id = provider_id
         self._umo = umo
-        self._info: Any = None
+        self._info: Any = info
 
     async def _resolve(self) -> tuple[str | None, Any]:
         """Resolve the effective provider id and metadata once."""
@@ -295,15 +318,23 @@ class Provider:
         _, info = await self._resolve()
         return getattr(info, "model", None)
 
-    async def meta(self) -> ProviderMetaData | None:
-        """Return the resolved provider's metadata."""
-        provider_id, info = await self._resolve()
+    def meta(self) -> ProviderMetaData | None:
+        """Return the provider's metadata from the seeded/resolved info.
+
+        In-process this method is synchronous; the facade serves it from
+        the handshake snapshot or the last RPC resolution.
+        """
+        info = self._info
         if info is None:
-            return None
+            if self._provider_id is None:
+                return None
+            return ProviderMetaData(id=self._provider_id)
+        legacy_type = _LEGACY_TYPE_BY_KIND.get(getattr(info, "kind", None))
         return ProviderMetaData(
-            id=provider_id or "",
+            id=getattr(info, "id", None) or self._provider_id or "",
             model=getattr(info, "model", None),
             type=getattr(info, "provider_type", ""),
+            provider_type=legacy_type,
         )
 
     def get_provider_id(self) -> str | None:
@@ -323,6 +354,10 @@ class TTSProvider:
         self._ctx = ctx
         self._provider_id = provider_id
         self._umo = umo
+
+    def get_provider_id(self) -> str | None:
+        """Return the explicitly bound provider id, if any."""
+        return self._provider_id
 
     async def get_audio(self, text: str) -> Any:
         """Synthesize speech; returns an AssetRef media components accept."""
@@ -346,6 +381,10 @@ class STTProvider:
         self._provider_id = provider_id
         self._umo = umo
 
+    def get_provider_id(self) -> str | None:
+        """Return the explicitly bound provider id, if any."""
+        return self._provider_id
+
     async def get_text(self, audio_url: Any) -> str:
         """Transcribe audio into text."""
         transcript = await self._ctx.llm.transcribe(
@@ -368,6 +407,10 @@ class EmbeddingProvider:
         self._ctx = ctx
         self._provider_id = provider_id
         self._umo = umo
+
+    def get_provider_id(self) -> str | None:
+        """Return the explicitly bound provider id, if any."""
+        return self._provider_id
 
     async def get_embedding(self, text: str) -> list[float]:
         """Embed one text."""

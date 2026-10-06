@@ -79,6 +79,18 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
     def bot(self) -> LegacyBotProxy:
         return LegacyBotProxy(self._event, self._context)
 
+    @classmethod
+    async def send_message(cls, *args: Any, **kwargs: Any) -> None:
+        # Present so legacy plugins can monkeypatch the class-level send
+        # hook like they do in-process. The real implementation needs the
+        # live OneBot connection, which only exists in the Host.
+        from .errors import IsolationUnsupportedError
+
+        raise IsolationUnsupportedError(
+            "AiocqhttpMessageEvent.send_message is unavailable in isolated "
+            "legacy mode; plugins needing it must run in-process."
+        )
+
 
 class QQOfficialMessageEvent(AstrMessageEvent):
     """Legacy QQ official API event facade."""

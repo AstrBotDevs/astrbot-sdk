@@ -207,10 +207,14 @@
   走 RPC 全量快照，Host 侧 clear+update 后 save_config_async 提交，
   仅 legacy 可声明），21 个 save_config 插件 17 个恢复；其余 4 个
   属于其他已知桶。新发现缺口：130 个插件同步迭代
-  `Context.get_all_providers()`（compat 目前是 async RPC，迭代
+  `Context.get_all_providers()`（compat 当时是 async RPC，迭代
   coroutine 直接 TypeError；smart_imagechat_hub 在 initialize 期
-  触发）——候选方案：握手时下发热 provider 快照，compat 同步返回
-  预绑定 facade。剩余失败分桶（设计排除为主）：
+  触发）。四轮复扫（2026-10-06，1954 ok / 430 fail，82.0%）：
+  Context 快照接口落地（见下），60 个插件恢复、2 个回退
+  （zai 上游删 API 的环境漂移；shutup_when_muted 缺
+  AiocqhttpMessageEvent.send_message 类方法桩，已补）。`get_config`
+  62、persona_manager 5、`get_all_providers` 130 三桶消除。
+  剩余失败分桶（设计排除为主）：
   `astrbot.core` 直接导入 74+52+6、`Context.get_config()` 62、
   `register_platform_adapter` 19+9、
   `activate_llm_tool`/`get_llm_tool_manager` 7+6、`persona_manager` 5
@@ -238,10 +242,29 @@
   强制 JSON 安全）。**该能力只授予 legacy 插件**：bridge 对新 SDK
   插件声明 platform.raw 直接拒绝加载，新 SDK 公共 API 无对应面。
   wechatpadpro/gewechat 社区适配器为 import-only 壳（非 Host 平台）。
-- [ ] 旧版兼容层 P3（长尾，按需）：`persona_manager`（等 personas 能力）、
-  `astrbot.api.web` 路由（等 web 能力设计）、`EmbeddingProvider` 等
-  类型外观的剩余零散项、`star_handlers_registry` 等注册表内省
-  （当前降级为空）。
+- [x] 旧版兼容层 Context 快照接口（2026-10-06）：`get_config(umo)`、
+  `get_all_providers()`、`get_using_provider(umo)`（含 tts/stt）、
+  `provider_manager`（provider_insts/stt/tts/embedding 列表、
+  `curr_provider_inst`、`personas`、`persona_mgr`）、`persona_manager`
+  （`get_persona_v3_by_id`、`get_default_persona_v3`、
+  `resolve_selected_persona`）由握手时下发的 host 快照同步服务，
+  与进程内 core 的同步语义对齐（原 async RPC 迭代 coroutine 的
+  TypeError 桶消除）。方案：bridge 在插件启动时构建 JSON 快照
+  （providers/defaults/umo 偏好/personas/全局配置），随 initialize
+  握手 `host_info.snapshot` 下发；compat `host_snapshot.py` 复刻
+  core 的 umo 路由（UmopConfigRouter fnmatch）与
+  `_resolve_using_provider` 解析逻辑。**已知限制**：快照在加载时
+  冻结，运行时 Host 侧改配置/增删 provider/persona 需重载插件才
+  可见。`get_config` 返回的是黑名单递归脱敏副本（key/secret/
+  password/token/credential 词命中即置空，用户拍板黑名单）。
+  persona prompt 写入（meme_manager 式 `persona["prompt"] = x`）经
+  `persona.write` 能力（仅 legacy）转发，Host 只改内存 personas_v3
+  不落盘；persona CRUD（增删 persona）本轮抛
+  IsolationUnsupportedError，等正式 personas 能力设计。
+- [ ] 旧版兼容层 P3（长尾，按需）：`astrbot.api.web` 路由
+  （等 web 能力设计）、`EmbeddingProvider` 等类型外观的剩余零散项、
+  `star_handlers_registry` 等注册表内省（当前降级为空）、
+  persona CRUD（见上）。
 
 - [ ] **Hook Decision 拦截**（`ToolCallDecision.block` /
   `MessageSendDecision.block`）：需要 core 在执行点增加拦截通道

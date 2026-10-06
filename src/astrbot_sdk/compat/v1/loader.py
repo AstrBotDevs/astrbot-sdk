@@ -728,7 +728,8 @@ def load_legacy_plugin(
 
     if config is not None and not isinstance(config, CompatConfig):
         config = CompatConfig(config, ctx=ctx)
-    context = CompatContext(ctx, config=config)
+    snapshot = host_info.get("snapshot") if isinstance(host_info, Mapping) else None
+    context = CompatContext(ctx, config=config, snapshot=snapshot)
     from .star import StarTools
 
     StarTools.initialize(context)

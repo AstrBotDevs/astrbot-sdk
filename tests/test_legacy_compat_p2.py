@@ -11,7 +11,6 @@ import pytest
 import yaml
 
 from astrbot_sdk.capabilities import CapabilityGrant, CapabilitySet
-from astrbot_sdk.errors import RemotePluginError
 from astrbot_sdk.events import (
     UMO,
     MessageEvent,
@@ -66,8 +65,8 @@ class LegacyProviderPlugin(Star):
 
     @filter.command("globalconf")
     async def globalconf(self, event: AstrMessageEvent):
-        self.context.get_config()
-        yield event.plain_result("unreachable")
+        cfg = self.context.get_config()
+        yield event.plain_result(f"tz={cfg['timezone']} admins={cfg.get('admins_id')}")
 """
 
 
@@ -157,6 +156,24 @@ async def test_legacy_provider_facade(tmp_path: Path) -> None:
                 "llm.generate",
                 "llm.agent",
             ),
+            host_info={
+                "snapshot": {
+                    "providers": {
+                        "chat": [
+                            {"id": "current-1", "model": "model-x", "type": "openai"},
+                            {"id": "explicit-1", "model": "model-y", "type": "openai"},
+                        ],
+                    },
+                    "provider_defaults": {"chat": "current-1"},
+                    "provider_umo_prefs": {},
+                    "config": {
+                        "timezone": "Asia/Shanghai",
+                        "admins_id": ["admin-1"],
+                    },
+                    "config_profiles": {},
+                    "config_routes": {},
+                },
+            },
         )
 
         results = [r async for r in client.invoke("show_config", make_event())]
@@ -186,7 +203,9 @@ async def test_legacy_provider_facade(tmp_path: Path) -> None:
         assert agent_calls[-1]["provider_id"] == "explicit-1"
         assert agent_calls[-1]["tools"] is None
 
-        with pytest.raises(RemotePluginError, match="global AstrBot config"):
-            _ = [r async for r in client.invoke("globalconf", make_event())]
+        results = [r async for r in client.invoke("globalconf", make_event())]
+        assert [r.message.text for r in results if r is not None] == [
+            "tz=Asia/Shanghai admins=['admin-1']",
+        ]
     finally:
         await client.close()

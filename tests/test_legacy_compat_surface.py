@@ -337,7 +337,7 @@ class LegacyV2Plugin(Star):
     async def ttsstt(self, event: AstrMessageEvent):
         audio = await self.context.get_using_tts_provider().get_audio("hello")
         text = await self.context.get_using_stt_provider().get_text(audio)
-        vec = await self.context.get_all_embedding_providers()
+        vec = self.context.get_all_embedding_providers()
         dim = await vec[0].get_embedding("x")
         yield event.plain_result(f"tts={text} dim={len(dim)}")
 
@@ -444,6 +444,41 @@ async def test_legacy_surface_v2(tmp_path: Path) -> None:
                 "speech.transcribe",
                 "llm.embed",
             ),
+            host_info={
+                "snapshot": {
+                    "providers": {
+                        "chat": [],
+                        "speech_to_text": [
+                            {"id": "stt-1", "model": "whisper", "type": "openai"},
+                        ],
+                        "text_to_speech": [
+                            {"id": "tts-1", "model": "tts", "type": "openai"},
+                        ],
+                        "embedding": [
+                            {"id": "emb-1", "model": "e5", "type": "local"},
+                        ],
+                    },
+                    "provider_defaults": {
+                        "chat": None,
+                        "speech_to_text": "stt-1",
+                        "text_to_speech": "tts-1",
+                        "embedding": "emb-1",
+                    },
+                    "provider_umo_prefs": {},
+                    "config": {
+                        "provider_stt_settings": {
+                            "enable": True,
+                            "provider_id": "stt-1",
+                        },
+                        "provider_tts_settings": {
+                            "enable": True,
+                            "provider_id": "tts-1",
+                        },
+                    },
+                    "config_profiles": {},
+                    "config_routes": {},
+                },
+            },
         )
 
         # register_task ran during initialize.

@@ -11,6 +11,7 @@ from .components import MessageChain
 from .errors import IsolationUnsupportedError
 from .event import AstrMessageEvent  # noqa: F401  (re-exported for plugins)
 from .provider import LLMResponse, Provider  # noqa: F401
+from .provider import ProviderType as _CompatProviderType
 from .tools import FunctionTool, LegacyFunctionToolAdapter
 
 
@@ -49,24 +50,35 @@ class MessageSesion:
 class Context:
     """Facade over the plugin's new SDK context with the old Context API."""
 
-    def __init__(self, ctx: Any, config: Any = None) -> None:
+    def __init__(self, ctx: Any, config: Any = None, snapshot: Any = None) -> None:
         self._ctx = ctx
         self._config = config or {}
+        self._snapshot = snapshot if isinstance(snapshot, dict) else {}
         self._pending: list[asyncio.Task] = []
         self._tasks: list[asyncio.Task] = []
         self._stars_cache: list | None = None
         self._web_routes: list = []
         self.logger = ctx.logger
         from .conversation import ConversationManager
+        from .host_snapshot import PersonaManagerFacade, ProviderManagerFacade
 
         self.conversation_manager = ConversationManager(ctx)
+        self._persona_manager = PersonaManagerFacade(ctx, self._snapshot)
+        self._provider_manager = ProviderManagerFacade(
+            ctx,
+            self._snapshot,
+            self._persona_manager,
+        )
 
     @property
     def persona_manager(self) -> Any:
-        """Persona management is host-internal in isolated mode."""
-        raise IsolationUnsupportedError(
-            "persona_manager is unavailable in isolated legacy mode"
-        )
+        """Sync persona getters served from the handshake snapshot."""
+        return self._persona_manager
+
+    @property
+    def provider_manager(self) -> Any:
+        """Legacy provider registry served from the handshake snapshot."""
+        return self._provider_manager
 
     @property
     def html_renderer(self) -> Any:
@@ -76,22 +88,32 @@ class Context:
         return HtmlRendererFacade()
 
     def get_config(self, umo: str | None = None) -> Any:
-        """Return the global AstrBot configuration.
+        """Return the redacted global AstrBot config, routed by umo.
 
-        The global config is host-internal and cannot cross the isolation
-        boundary; plugins needing it must run in-process.
+        Served from the handshake snapshot with secrets blanked by the
+        host; runtime host edits only arrive after a plugin reload.
         """
-        raise IsolationUnsupportedError(
-            "Context.get_config() (global AstrBot config) is unavailable in "
-            "isolated legacy mode; the plugin's own config arrives through "
-            "the Star constructor"
-        )
+        if not self._snapshot.get("config"):
+            raise IsolationUnsupportedError(
+                "Context.get_config() has no host config snapshot; the plugin "
+                "must run in-process"
+            )
+        from .host_snapshot import copy_global_config
+
+        return copy_global_config(self._snapshot, str(umo) if umo is not None else None)
 
     # ---- providers ---------------------------------------------------------
 
-    def get_using_provider(self, umo: str | None = None) -> Provider:
-        """Return a lazily-resolved facade for the session's chat provider."""
-        return Provider(self._ctx, umo=umo)
+    def get_using_provider(self, umo: str | None = None) -> Provider | None:
+        """Return the session's chat provider, or None when unavailable.
+
+        Resolved synchronously from the handshake snapshot, mirroring the
+        in-process semantics (a concrete provider bound at call time).
+        """
+        return self._provider_manager.get_using_provider(
+            _CompatProviderType.CHAT_COMPLETION,
+            str(umo) if umo is not None else None,
+        )
 
     async def get_using_provider_async(self, umo: str | None = None) -> Provider:
         """Async variant of get_using_provider (provider metadata resolved)."""
@@ -99,9 +121,29 @@ class Context:
         await provider._resolve()
         return provider
 
-    def get_provider_by_id(self, provider_id: str) -> Provider:
-        """Return a facade bound to one explicit provider instance."""
-        return Provider(self._ctx, provider_id=provider_id)
+    def get_provider_by_id(self, provider_id: str) -> Provider | None:
+        """Return a facade bound to one explicit provider instance.
+
+        Returns None when the id is unknown, mirroring the in-process
+        behavior (which also logs a warning).
+        """
+        from ...llm import ProviderKind
+        from .host_snapshot import find_provider_entry, provider_info
+
+        entry = find_provider_entry(self._snapshot, ProviderKind.CHAT, provider_id)
+        if entry is None:
+            if provider_id:
+                self.logger.warning(
+                    "Provider %s was not found. Its provider or model ID may "
+                    "have been changed.",
+                    provider_id,
+                )
+            return None
+        return Provider(
+            self._ctx,
+            provider_id=provider_id,
+            info=provider_info(entry, ProviderKind.CHAT),
+        )
 
     async def get_current_chat_provider_id(self, umo: str) -> str | None:
         """Return the chat provider id currently selected for the session."""
@@ -110,12 +152,9 @@ class Context:
         info = await self._ctx.llm.current_provider(ProviderKind.CHAT, umo=umo)
         return info.id if info is not None else None
 
-    async def get_all_providers(self) -> list[Provider]:
-        """Return facades for every configured chat provider."""
-        from ...llm import ProviderKind
-
-        providers = await self._ctx.llm.list_providers(ProviderKind.CHAT)
-        return [Provider(self._ctx, provider_id=info.id) for info in providers]
+    def get_all_providers(self) -> list[Provider]:
+        """Return facades for every configured chat provider (sync)."""
+        return list(self._provider_manager.provider_insts)
 
     async def llm_generate(
         self,
@@ -212,43 +251,36 @@ class Context:
     # ---- speech and embedding providers -------------------------------------
 
     def get_using_tts_provider(self, umo: str | None = None) -> Any:
-        """Return a lazily-resolved facade for the session's TTS provider."""
-        from .provider import TTSProvider
-
-        return TTSProvider(self._ctx, umo=umo)
+        """Return the session's TTS provider, or None when disabled."""
+        return self._provider_manager.get_using_provider(
+            _CompatProviderType.TEXT_TO_SPEECH,
+            str(umo) if umo is not None else None,
+        )
 
     async def get_using_tts_provider_async(self, umo: str | None = None) -> Any:
         return self.get_using_tts_provider(umo)
 
     def get_using_stt_provider(self, umo: str | None = None) -> Any:
-        """Return a lazily-resolved facade for the session's STT provider."""
-        from .provider import STTProvider
-
-        return STTProvider(self._ctx, umo=umo)
+        """Return the session's STT provider, or None when disabled."""
+        return self._provider_manager.get_using_provider(
+            _CompatProviderType.SPEECH_TO_TEXT,
+            str(umo) if umo is not None else None,
+        )
 
     async def get_using_stt_provider_async(self, umo: str | None = None) -> Any:
         return self.get_using_stt_provider(umo)
 
-    async def get_all_tts_providers(self) -> list:
-        from ...llm import ProviderKind
-        from .provider import TTSProvider
+    def get_all_tts_providers(self) -> list:
+        """Return facades for every configured TTS provider (sync)."""
+        return list(self._provider_manager.tts_provider_insts)
 
-        infos = await self._ctx.llm.list_providers(ProviderKind.TEXT_TO_SPEECH)
-        return [TTSProvider(self._ctx, provider_id=info.id) for info in infos]
+    def get_all_stt_providers(self) -> list:
+        """Return facades for every configured STT provider (sync)."""
+        return list(self._provider_manager.stt_provider_insts)
 
-    async def get_all_stt_providers(self) -> list:
-        from ...llm import ProviderKind
-        from .provider import STTProvider
-
-        infos = await self._ctx.llm.list_providers(ProviderKind.SPEECH_TO_TEXT)
-        return [STTProvider(self._ctx, provider_id=info.id) for info in infos]
-
-    async def get_all_embedding_providers(self) -> list:
-        from ...llm import ProviderKind
-        from .provider import EmbeddingProvider
-
-        infos = await self._ctx.llm.list_providers(ProviderKind.EMBEDDING)
-        return [EmbeddingProvider(self._ctx, provider_id=info.id) for info in infos]
+    def get_all_embedding_providers(self) -> list:
+        """Return facades for every configured embedding provider (sync)."""
+        return list(self._provider_manager.embedding_provider_insts)
 
     # ---- background tasks ---------------------------------------------------
 
