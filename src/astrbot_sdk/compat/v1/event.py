@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
+import logging
+import os
 from typing import Any
 
 from ...events import MessageEvent, SenderRole
@@ -20,6 +23,8 @@ from .components import (
 from .components import (
     ResultContentType as ResultContentType,
 )
+
+logger = logging.getLogger(__name__)
 
 # Marker attribute where compat filter decorators accumulate their specs.
 _FILTERS_ATTR = "__astrbot_compat_filters__"
@@ -468,6 +473,10 @@ class AstrMessageEvent:
         self.message_str = event.text
         self.is_wake = event.is_wake
         self.role = "admin" if event.sender.role is SenderRole.ADMIN else "member"
+        self.created_at = event.timestamp.timestamp()
+        self.plugins_name = event.extras.get("plugins_name")
+        self._call_llm = False
+        self._temporary_local_files: list[str] = []
 
     # ---- identity helpers -------------------------------------------------
 
@@ -595,6 +604,115 @@ class AstrMessageEvent:
 
     def is_stopped(self) -> bool:
         return self._stopped
+
+    # ---- event-level flags mirrored to the Host -----------------------------
+
+    @property
+    def call_llm(self) -> bool:
+        """Whether the default LLM request is suppressed for this event."""
+        return self._call_llm
+
+    @call_llm.setter
+    def call_llm(self, value: bool) -> None:
+        self._call_llm = bool(value)
+        # The pipeline reads call_llm on the Host-side event; forward the flag
+        # so the change takes effect beyond this local facade.
+        try:
+            asyncio.get_running_loop().create_task(
+                self._context._ctx._invoke_capability(
+                    "event.state",
+                    "set_call_llm",
+                    {"umo": self.unified_msg_origin, "value": self._call_llm},
+                ),
+            )
+        except RuntimeError:
+            # No running loop (e.g. sync test contexts): the local flag still
+            # mirrors core behavior within this facade.
+            pass
+
+    def should_call_llm(self, call_llm: bool) -> None:
+        """Suppress the default LLM request for this event (legacy naming)."""
+        self.call_llm = call_llm
+
+    # ---- platform adapter facades -------------------------------------------
+
+    @property
+    def platform(self) -> Any:
+        """Platform adapter facade for this event (snapshot-backed)."""
+        manager = getattr(self._context, "platform_manager", None)
+        for inst in getattr(manager, "platform_insts", None) or ():
+            try:
+                if inst.meta().id == self._event.umo.platform_id:
+                    return inst
+            except Exception:  # a broken entry must not break attribute reads
+                continue
+        return None
+
+    @property
+    def platform_meta(self) -> Any:
+        """Platform metadata of the receiving adapter, or None."""
+        platform = self.platform
+        return platform.meta() if platform is not None else None
+
+    # ---- platform actions forwarded to the in-flight Host event -------------
+
+    async def _call_event_method(self, method: str, **kwargs: Any) -> Any:
+        result = await self._context._ctx._invoke_capability(
+            "event.state",
+            "call_method",
+            {"umo": self.unified_msg_origin, "method": method, "args": kwargs},
+        )
+        if isinstance(result, dict):
+            return result.get("result")
+        return None
+
+    async def send_typing(self) -> None:
+        """Send the typing indicator through the Host event."""
+        await self._call_event_method("send_typing")
+
+    async def stop_typing(self) -> None:
+        """Stop the typing indicator through the Host event."""
+        await self._call_event_method("stop_typing")
+
+    async def react(self, emoji: str) -> None:
+        """Add an emoji reaction through the Host event."""
+        await self._call_event_method("react", emoji=emoji)
+
+    async def get_group(self, group_id: str | None = None, **kwargs: Any) -> Any:
+        """Query group information through the Host event."""
+        if group_id is not None:
+            kwargs["group_id"] = group_id
+        data = await self._call_event_method("get_group", **kwargs)
+        if isinstance(data, dict):
+            return Group(**data)
+        return None
+
+    # ---- event-scoped temporary files (Runner-local) -------------------------
+
+    def track_temporary_local_file(self, path: str) -> None:
+        """Register a local file to delete when the event finishes."""
+        if path and path not in self._temporary_local_files:
+            self._temporary_local_files.append(path)
+
+    def untrack_temporary_local_file(self, path: str) -> None:
+        """Exclude a retained attachment from event-scoped cleanup."""
+        if path in self._temporary_local_files:
+            self._temporary_local_files.remove(path)
+
+    def cleanup_temporary_local_files(self) -> None:
+        """Delete every tracked temporary local file."""
+        paths = list(self._temporary_local_files)
+        self._temporary_local_files.clear()
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove temporary local file %s: %s",
+                    path,
+                    e,
+                )
 
     # ---- extras and proactive send -----------------------------------------
 

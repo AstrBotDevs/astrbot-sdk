@@ -77,7 +77,25 @@ class LegacyBotProxy:
             platform_type: Platform metadata name of the instance.
         """
         self._context = context
+        self._platform_id = platform_id
         self.api = LegacyBotApiProxy(context, platform_id, platform_type)
+
+    @property
+    def platform(self) -> Any:
+        """Adapter facade for this bot (mirrors botClient.set_platform).
+
+        In-process, the raw bot client carries the live platform adapter, and
+        legacy plugins read bot.platform.config from it. Resolve the matching
+        snapshot-backed facade; None when the instance is gone.
+        """
+        manager = getattr(self._context, "platform_manager", None)
+        for inst in getattr(manager, "platform_insts", None) or ():
+            try:
+                if inst.meta().id == self._platform_id:
+                    return inst
+            except Exception:  # a broken entry must not break attribute reads
+                continue
+        return None
 
     @classmethod
     def from_event(cls, event: MessageEvent, context: Any) -> LegacyBotProxy:

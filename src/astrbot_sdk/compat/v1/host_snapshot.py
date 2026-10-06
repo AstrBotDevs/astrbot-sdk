@@ -495,9 +495,9 @@ class PlatformFacade:
         """
         self._facade_context = facade_context
         self._entry = dict(entry)
-        # Legacy plugins may read platform.config; the real adapter config is
-        # Host-only, so expose an empty dict rather than a stale secret copy.
-        self.config: dict = {}
+        # Legacy plugins read platform.config (e.g. bot.platform.config for
+        # the qq_official appid); the snapshot ships it redacted by the Host.
+        self.config: dict = dict(entry.get("config") or {})
         self.client_self_id = ""
 
     def meta(self) -> Any:

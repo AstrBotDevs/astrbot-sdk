@@ -670,3 +670,184 @@ class PropertyPlugin(Star):
         assert {h.id for h in handshake.handlers} == {"hello"}
     finally:
         await client.close()
+
+
+def _make_facade(context: Any, *, extras: dict | None = None) -> Any:
+    """Build one legacy event facade over a fixed SDK event."""
+    from astrbot_sdk.compat.v1.event import AstrMessageEvent
+
+    event = MessageEvent(
+        id="event-x",
+        umo=UMO("plat-1", MessageType.GROUP, "group-1"),
+        platform_type="aiocqhttp",
+        message_ref=MessageRef("event-x"),
+        message=MessageChain(Plain("moe")),
+        sender=Sender("user-1", "Moon"),
+        timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        extras=extras or {},
+    )
+    return AstrMessageEvent(event, context)
+
+
+@pytest.mark.asyncio
+async def test_compat_event_call_llm_flag_forwards_to_host() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    invoke = AsyncMock(return_value={})
+    facade = _make_facade(
+        SimpleNamespace(_ctx=SimpleNamespace(_invoke_capability=invoke))
+    )
+
+    assert facade.call_llm is False
+    facade.call_llm = True
+    assert facade.call_llm is True
+    await asyncio.sleep(0)
+    invoke.assert_awaited_once_with(
+        "event.state",
+        "set_call_llm",
+        {"umo": "plat-1:GroupMessage:group-1", "value": True},
+    )
+
+    invoke.reset_mock()
+    facade.should_call_llm(False)
+    assert facade.call_llm is False
+    await asyncio.sleep(0)
+    invoke.assert_awaited_once_with(
+        "event.state",
+        "set_call_llm",
+        {"umo": "plat-1:GroupMessage:group-1", "value": False},
+    )
+
+
+def test_compat_event_extras_plugins_name_and_created_at() -> None:
+    from types import SimpleNamespace
+
+    facade = _make_facade(SimpleNamespace(), extras={"plugins_name": ["a", "b"]})
+    assert facade.plugins_name == ["a", "b"]
+    assert facade.created_at == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
+
+    empty = _make_facade(SimpleNamespace())
+    assert empty.plugins_name is None
+
+
+def test_compat_event_platform_facades_resolve_from_snapshot() -> None:
+    from types import SimpleNamespace
+
+    from astrbot_sdk.compat.v1.host_snapshot import PlatformFacade
+
+    target = PlatformFacade(
+        SimpleNamespace(),
+        {"id": "plat-1", "name": "aiocqhttp", "config": {"appid": "123"}},
+    )
+    other = PlatformFacade(SimpleNamespace(), {"id": "plat-2", "name": "webchat"})
+    context = SimpleNamespace(
+        platform_manager=SimpleNamespace(platform_insts=[other, target]),
+    )
+    facade = _make_facade(context)
+
+    assert facade.platform is target
+    assert facade.platform.config == {"appid": "123"}
+    assert facade.platform_meta.id == "plat-1"
+    assert facade.platform_meta.name == "aiocqhttp"
+
+    missing = _make_facade(SimpleNamespace(platform_manager=None))
+    assert missing.platform is None
+    assert missing.platform_meta is None
+
+
+@pytest.mark.asyncio
+async def test_compat_event_forwarded_platform_actions() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from astrbot_sdk.compat.v1.event import Group
+
+    invoke = AsyncMock(
+        return_value={"result": {"group_id": "group-1", "group_name": "G", "extra": 1}},
+    )
+    facade = _make_facade(
+        SimpleNamespace(_ctx=SimpleNamespace(_invoke_capability=invoke))
+    )
+
+    await facade.send_typing()
+    assert invoke.await_args.args[1] == "call_method"
+    assert invoke.await_args.args[2]["method"] == "send_typing"
+
+    await facade.stop_typing()
+    assert invoke.await_args.args[2]["method"] == "stop_typing"
+
+    await facade.react("👍")
+    assert invoke.await_args.args[2]["method"] == "react"
+    assert invoke.await_args.args[2]["args"] == {"emoji": "👍"}
+
+    group = await facade.get_group()
+    assert invoke.await_args.args[2]["method"] == "get_group"
+    assert isinstance(group, Group)
+    assert group.group_id == "group-1"
+    assert group.group_name == "G"
+
+    invoke = AsyncMock(return_value={"result": None})
+    facade = _make_facade(
+        SimpleNamespace(_ctx=SimpleNamespace(_invoke_capability=invoke))
+    )
+    assert await facade.get_group() is None
+
+
+def test_compat_event_temporary_local_files(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    kept = tmp_path / "kept.bin"
+    dropped = tmp_path / "dropped.bin"
+    kept.write_text("k")
+    dropped.write_text("d")
+
+    facade = _make_facade(SimpleNamespace())
+    facade.track_temporary_local_file(str(kept))
+    facade.track_temporary_local_file(str(dropped))
+    facade.track_temporary_local_file(str(kept))  # no duplicates
+    facade.untrack_temporary_local_file(str(kept))
+    facade.cleanup_temporary_local_files()
+
+    assert kept.exists()
+    assert not dropped.exists()
+    facade.cleanup_temporary_local_files()  # idempotent
+
+
+def test_legacy_bot_proxy_platform_property() -> None:
+    from types import SimpleNamespace
+
+    from astrbot_sdk.compat.v1.host_snapshot import PlatformFacade
+    from astrbot_sdk.compat.v1.platform_events import LegacyBotProxy
+
+    target = PlatformFacade(
+        SimpleNamespace(),
+        {"id": "plat-1", "name": "aiocqhttp", "config": {"appid": "123"}},
+    )
+    context = SimpleNamespace(
+        platform_manager=SimpleNamespace(platform_insts=[target]),
+    )
+    proxy = LegacyBotProxy(context, "plat-1", "aiocqhttp")
+    assert proxy.platform is target
+
+    missing = LegacyBotProxy(context, "plat-9", "aiocqhttp")
+    assert missing.platform is None
+
+
+@pytest.mark.asyncio
+async def test_compat_context_llm_tool_activation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from astrbot_sdk.compat.v1.star import Context
+
+    invoke = AsyncMock(return_value={"activated": True, "deactivated": False})
+    ctx = SimpleNamespace(logger=None, _invoke_capability=invoke)
+    context = Context(ctx)
+
+    assert await context.activate_llm_tool_async("my_tool") is True
+    assert invoke.await_args.args[:2] == ("llm.tool.register", "activate")
+    assert invoke.await_args.args[2] == {"name": "my_tool"}
+
+    assert await context.deactivate_llm_tool_async("my_tool") is False
+    assert invoke.await_args.args[:2] == ("llm.tool.register", "deactivate")

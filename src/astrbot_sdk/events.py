@@ -65,6 +65,10 @@ class MessageEvent:
     timestamp: datetime
     command: CommandInvocation | None = None
     is_wake: bool = False
+    extras: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "extras", MappingProxyType(dict(self.extras)))
 
     @property
     def text(self) -> str:

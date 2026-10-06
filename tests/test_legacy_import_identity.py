@@ -186,7 +186,8 @@ def test_spawn_child_reanchors_virtual_roots(tmp_path: Path) -> None:
     code = (
         "import os; "
         "os.environ['ASTRBOT_SDK_LEGACY_RUNNER'] = '1'; "
-        f"os.environ['ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS'] = {str(plugin_root.parent)!r}; "
+        "os.environ['ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS'] = "
+        f"{str(plugin_root.parent)!r}; "
         "import astrbot_sdk.runtime.__main__; "
         "import importlib; "
         # helper.py is self-contained (no astrbot imports), so importing it

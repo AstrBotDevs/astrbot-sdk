@@ -83,6 +83,16 @@ def test_message_event_round_trip() -> None:
     assert decoded.message.text == "hello"
 
 
+def test_message_event_extras_round_trip() -> None:
+    from dataclasses import replace
+
+    event = replace(make_event(), extras={"plugins_name": ["a"], "n": 1})
+
+    decoded = decode_message_event(encode_message_event(event))
+
+    assert dict(decoded.extras) == {"plugins_name": ["a"], "n": 1}
+
+
 def test_message_result_round_trip() -> None:
     result = MessageResult(
         propagation=Propagation.STOP,

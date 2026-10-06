@@ -408,11 +408,29 @@ class Context:
             "activate_llm_tool is unavailable in isolated legacy mode"
         )
 
+    async def activate_llm_tool_async(self, name: str) -> bool:
+        """Activate a registered function-calling tool via the Host."""
+        result = await self._ctx._invoke_capability(
+            "llm.tool.register",
+            "activate",
+            {"name": name},
+        )
+        return bool(result.get("activated")) if isinstance(result, dict) else False
+
     def deactivate_llm_tool(self, name: str) -> bool:
         """Toggle a global tool's active flag (unsupported when isolated)."""
         raise IsolationUnsupportedError(
             "deactivate_llm_tool is unavailable in isolated legacy mode"
         )
+
+    async def deactivate_llm_tool_async(self, name: str) -> bool:
+        """Deactivate a registered function-calling tool via the Host."""
+        result = await self._ctx._invoke_capability(
+            "llm.tool.register",
+            "deactivate",
+            {"name": name},
+        )
+        return bool(result.get("deactivated")) if isinstance(result, dict) else False
 
     @property
     def registered_web_apis(self) -> list[tuple[str, Any, list[str], str]]:

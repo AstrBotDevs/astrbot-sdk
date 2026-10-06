@@ -667,44 +667,51 @@ def _wrap_handler(
 
     async def wrapper(event, **kwargs):
         facade = build_legacy_event(event, plugin.context)
-        for custom_filter in custom_filters or []:
-            # The global config does not cross the isolation boundary; custom
-            # filters receive None for the legacy cfg argument.
-            try:
-                accepted = custom_filter.filter(facade, None)
-            except TypeError:
-                accepted = custom_filter.filter(facade)
-            if inspect.isawaitable(accepted):
-                accepted = await accepted
-            if not accepted:
+        try:
+            for custom_filter in custom_filters or []:
+                # The global config does not cross the isolation boundary; custom
+                # filters receive None for the legacy cfg argument.
+                try:
+                    accepted = custom_filter.filter(facade, None)
+                except TypeError:
+                    accepted = custom_filter.filter(facade)
+                if inspect.isawaitable(accepted):
+                    accepted = await accepted
+                if not accepted:
+                    return
+            if spec is not None and spec.kind is HandlerKind.COMMAND:
+                kwargs = {
+                    **_parse_legacy_args(method, spec, facade.message_str),
+                    **kwargs,
+                }
+            outcome = method(facade, **kwargs)
+            if inspect.isasyncgen(outcome):
+                async for item in outcome:
+                    from .provider import ProviderRequest as _CompatProviderRequest
+
+                    if isinstance(item, _CompatProviderRequest):
+                        item = await _execute_llm_request(plugin, facade, item)
+                        if item is None:
+                            continue
+                    yield translate_compat_result(item, facade)
                 return
-        if spec is not None and spec.kind is HandlerKind.COMMAND:
-            kwargs = {**_parse_legacy_args(method, spec, facade.message_str), **kwargs}
-        outcome = method(facade, **kwargs)
-        if inspect.isasyncgen(outcome):
-            async for item in outcome:
-                from .provider import ProviderRequest as _CompatProviderRequest
+            returned = await outcome
+            if isinstance(returned, MessageEventResult):
+                # Legacy handlers may return event.plain_result(...) directly.
+                yield returned.to_sdk_result()
+            elif returned is not None:
+                yield translate_compat_result(returned, facade)
+            else:
+                result = facade.get_result()
+                if result is not None:
+                    yield result.to_sdk_result()
+                elif facade.is_stopped():
+                    from ...results import EventResult, Propagation
 
-                if isinstance(item, _CompatProviderRequest):
-                    item = await _execute_llm_request(plugin, facade, item)
-                    if item is None:
-                        continue
-                yield translate_compat_result(item, facade)
-            return
-        returned = await outcome
-        if isinstance(returned, MessageEventResult):
-            # Legacy handlers may return event.plain_result(...) directly.
-            yield returned.to_sdk_result()
-        elif returned is not None:
-            yield translate_compat_result(returned, facade)
-        else:
-            result = facade.get_result()
-            if result is not None:
-                yield result.to_sdk_result()
-            elif facade.is_stopped():
-                from ...results import EventResult, Propagation
-
-                yield EventResult(propagation=Propagation.STOP)
+                    yield EventResult(propagation=Propagation.STOP)
+        finally:
+            # Mirror the Host pipeline's event-scoped temp file cleanup.
+            facade.cleanup_temporary_local_files()
 
     wrapper.__name__ = method.__name__
     return wrapper
