@@ -88,6 +88,8 @@ def _media_source(url: Any, file: Any) -> Any:
 
 def to_sdk_segment(component: Any) -> MessageSegment:
     """Convert one compat component into the new SDK segment."""
+    if isinstance(component, UnknownComponent):
+        return component.segment
     if isinstance(component, Plain):
         return SDKPlain(component.text)
     if isinstance(component, AtAll):

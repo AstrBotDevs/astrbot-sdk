@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import MutableSequence
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
 from ...hooks import HookDTO, build_stage_dto
+from ...protocol.codec import decode_message_chain
 from ...registration import HandlerKind
 from .components import (
+    MessageChain,
     MessageEventResult,
     from_sdk_segment,
     to_sdk_segment,
@@ -80,33 +82,6 @@ class _HookLLMResponse:
             object.__getattribute__(self, "_local")[name] = value
 
 
-class _TrackedChainProxy(MutableSequence):
-    """Compat-component view over the tracked SDK segment list."""
-
-    def __init__(self, tracked: list) -> None:
-        self._tracked = tracked
-
-    def __getitem__(self, index: Any) -> Any:
-        if isinstance(index, slice):
-            return [from_sdk_segment(s) for s in self._tracked[index]]
-        return from_sdk_segment(self._tracked[index])
-
-    def __setitem__(self, index: Any, value: Any) -> None:
-        if isinstance(index, slice):
-            self._tracked[index] = [to_sdk_segment(v) for v in value]
-        else:
-            self._tracked[index] = to_sdk_segment(value)
-
-    def __delitem__(self, index: Any) -> None:
-        del self._tracked[index]
-
-    def __len__(self) -> int:
-        return len(self._tracked)
-
-    def insert(self, index: int, value: Any) -> None:
-        self._tracked.insert(index, to_sdk_segment(value))
-
-
 def _tool_namespace(payload: dict[str, Any]) -> SimpleNamespace:
     """Build the legacy FunctionTool-shaped object for tool hooks."""
     return SimpleNamespace(
@@ -148,7 +123,20 @@ async def invoke_compat_hook(
     elif stage == "message_result":
         if facade_event is not None and dto is not None:
             result = MessageEventResult()
-            result.chain = _TrackedChainProxy(dto.chain)
+            # A plain list of compat components, exactly like the in-process
+            # chain: isinstance(list) checks and in-place edits both work.
+            # The whole chain is copied back after the hook (see below).
+            # The chain arrives as SDK segments when the payload crossed the
+            # wire as a MessageChain envelope, or as raw segment dicts when
+            # the host passed plain JSON; normalize both to SDK segments.
+            raw_items = list(dto.chain)
+            wire_items = [item for item in raw_items if isinstance(item, Mapping)]
+            sdk_items = (
+                list(decode_message_chain(wire_items))
+                if len(wire_items) == len(raw_items)
+                else raw_items
+            )
+            result.chain = [from_sdk_segment(segment) for segment in sdk_items]
             facade_event.set_result(result)
         args = [facade_event]
     elif stage == "tool_call":
@@ -192,11 +180,15 @@ async def invoke_compat_hook(
         raise ValueError("legacy hook handler cannot yield results")
     await outcome
 
-    # A replaced result chain (event.set_result(...)) must be copied back.
+    # Copy the (possibly mutated or replaced) result chain back. The plugin
+    # received a plain list, so every mutation form lands in that list.
     if stage == "message_result" and facade_event is not None and dto is not None:
         result = facade_event.get_result()
-        if result is not None and not isinstance(result.chain, _TrackedChainProxy):
-            dto.chain = [to_sdk_segment(c) for c in result.chain]
+        if result is not None and result.chain is not None:
+            chain = result.chain
+            if isinstance(chain, MessageChain):
+                chain = chain.chain
+            dto.chain = [to_sdk_segment(c) for c in chain]
 
     return {
         "writes": dto._write_ops() if isinstance(dto, HookDTO) else [],

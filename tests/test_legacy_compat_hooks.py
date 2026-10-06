@@ -18,7 +18,7 @@ from astrbot_sdk.events import (
     MessageType,
     Sender,
 )
-from astrbot_sdk.message_components import Plain
+from astrbot_sdk.message_components import Plain, UnknownSegment
 from astrbot_sdk.messages import MessageChain
 from astrbot_sdk.runtime import StdioPluginClient
 from astrbot_sdk.tools import ToolCallContext
@@ -51,6 +51,17 @@ class LegacyHooksPlugin(Star):
     @filter.on_decorating_result()
     async def sign_result(self, event: AstrMessageEvent):
         event.get_result().chain.append(Plain(" --signed"))
+
+    @filter.on_decorating_result()
+    async def normalize_result(self, event: AstrMessageEvent):
+        # meme_manager-style normalization: isinstance check plus in-place
+        # component attribute edits.
+        chain = event.get_result().chain
+        if not isinstance(chain, list):
+            raise TypeError("chain must be a plain list")
+        for component in chain:
+            if isinstance(component, Plain):
+                component.text = component.text.strip()
 
     @filter.llm_tool(name="get_weather")
     async def get_weather(self, event: AstrMessageEvent, location: str):
@@ -200,6 +211,27 @@ async def test_legacy_hooks_and_tools(tmp_path: Path) -> None:
         assert chain_ops, result["writes"]
         appended = chain_ops[-1]["value"]
         assert appended[-1]["text"] == " --signed"
+
+        # meme_manager-style result normalization: the chain arrives as a
+        # plain list, component attribute edits are copied back, and unknown
+        # segments pass through the round trip untouched.
+        result = await client.invoke_hook(
+            "normalize_result",
+            event,
+            "message_result",
+            {
+                "chain": MessageChain(
+                    Plain("  padded  "),
+                    UnknownSegment(segment_type="CustomX", data={"k": 1}),
+                ),
+            },
+        )
+        chain_ops = [op for op in result["writes"] if op["field"] == "chain"]
+        assert chain_ops, result["writes"]
+        assert chain_ops[-1]["value"] == [
+            {"type": "Plain", "text": "padded"},
+            {"type": "Unknown", "segment_type": "CustomX", "data": {"k": 1}},
+        ]
 
         # llm_tool invocation through the new tool contract.
         call = ToolCallContext(id="call-1", umo=event.umo, event=event)

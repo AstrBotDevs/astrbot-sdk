@@ -459,6 +459,7 @@ class StdioPluginServer:
                 if spec.kind is HandlerKind.COMMAND:
                     details = {
                         "path": spec.path,
+                        "group": spec.group,
                         "aliases": list(spec.aliases),
                         "message_types": [
                             message_type.value for message_type in spec.message_types

@@ -87,6 +87,9 @@ class HandlerSpec:
     priority: int = 0
     path: str | None = None
     aliases: tuple[str, ...] = ()
+    # Legacy command groups: the handler is a registration anchor only; the
+    # host renders the group's usage tree on a bare group-name message.
+    group: bool = False
     tool_name: str | None = None
     message_types: tuple[MessageType, ...] = ()
     platforms: tuple[str, ...] = ()
