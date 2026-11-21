@@ -64,11 +64,11 @@ class LegacyMainApiShowcasePlugin(Star):
         )
 
     async def _web_ping(self) -> dict[str, Any]:
-        """Handle `/legacy/ping` inside the isolated Quart shim."""
+        """Handle `/legacy/ping` using `astrbot.api.web.request`."""
         return {
             "ok": True,
             "plugin": "legacy_main_api_showcase",
-            "q": request.args.get("q", ""),
+            "q": request.query.get("q", ""),
         }
 
     async def _on_cron_tick(self, tag: str = "") -> None:
