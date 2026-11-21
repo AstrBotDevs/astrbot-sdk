@@ -641,6 +641,11 @@ class StdioPluginServer:
                     continue
                 details: dict[str, Any] = {}
                 if spec.kind is HandlerKind.COMMAND:
+                    pre_cmd = getattr(
+                        registration.handler,
+                        "__command_params__",
+                        None,
+                    )
                     details = {
                         "path": spec.path,
                         "group": spec.group,
@@ -652,7 +657,11 @@ class StdioPluginServer:
                         ],
                         "platforms": list(spec.platforms),
                         "roles": [role.value for role in spec.roles],
-                        "params": _command_params_schema(registration),
+                        "params": (
+                            pre_cmd
+                            if pre_cmd is not None
+                            else _command_params_schema(registration)
+                        ),
                     }
                 elif spec.kind.value.startswith("hook."):
                     details = {

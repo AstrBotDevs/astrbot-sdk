@@ -515,6 +515,47 @@ def _legacy_tool_params(method: Any) -> list[dict[str, Any]]:
     return params
 
 
+def _legacy_command_params(method: Any) -> list[dict[str, Any]]:
+    """Derive command parameter metadata from a legacy command signature."""
+    parameters = list(inspect.signature(method).parameters.values())
+    if parameters and parameters[0].name == "self":
+        parameters = parameters[1:]
+    if parameters:
+        # First parameter after self is always the event facade.
+        parameters = parameters[1:]
+    schema: list[dict[str, Any]] = []
+    for param in parameters:
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
+        ann = param.annotation
+        ann_name = (
+            ann.__name__ if isinstance(ann, type) else str(ann).rsplit(".", 1)[-1]
+        )
+        has_default = param.default is not inspect.Parameter.empty
+        if ann is GreedyStr or ann_name == "GreedyStr":
+            param_type_name = "GreedyStr"
+        elif ann in (str, int, float, bool) and isinstance(ann, type):
+            param_type_name = ann.__name__
+        elif ann_name in {"str", "int", "float", "bool"}:
+            param_type_name = ann_name
+        elif has_default and type(param.default) in (str, int, float, bool):
+            param_type_name = type(param.default).__name__
+        else:
+            param_type_name = "str"
+        schema.append(
+            {
+                "name": param.name,
+                "type": param_type_name,
+                "required": not has_default,
+                "default": param.default if has_default else None,
+            }
+        )
+    return schema
+
+
 def _wrap_tool(
     plugin: Star,
     method: Any,
@@ -919,6 +960,8 @@ def load_legacy_plugin(
             handler.__tool_params__ = _legacy_tool_params(method)
         elif spec.kind in (HandlerKind.COMMAND, HandlerKind.MESSAGE):
             handler = _wrap_handler(instance, method, spec, custom_filters)
+            if spec.kind is HandlerKind.COMMAND:
+                handler.__command_params__ = _legacy_command_params(method)
         else:
             # Hook and lifecycle handlers keep their legacy signature; the
             # invoke paths adapt arguments per stage.
