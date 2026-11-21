@@ -437,6 +437,14 @@ async def test_legacy_command_group_custom_filter(tmp_path: Path) -> None:
             r async for r in client.invoke("kimi_public", make_event("kimi public"))
         ]
         assert [r.message.text for r in results if r is not None] == ["public ok"]
+
+        # Bare command-group anchor emits GroupUsage when group filters pass.
+        from astrbot_sdk.results import GroupUsage
+
+        bare_results = [
+            r async for r in client.invoke("kimi", make_event("kimi"), bare_group=True)
+        ]
+        assert [type(r) for r in bare_results if r is not None] == [GroupUsage]
     finally:
         await client.close()
 

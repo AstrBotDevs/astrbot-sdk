@@ -22,6 +22,11 @@ class MessageResult(EventResult):
     quote: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class GroupUsage(EventResult):
+    """Sentinel emitted by a legacy bare-group anchor when filters pass."""
+
+
 def message_result(
     content: MessageLike,
     *,

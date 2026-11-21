@@ -40,7 +40,7 @@ from ..messages import MessageChain
 from ..protocol_registry import (
     _PROTOCOL_DATACLASSES,
 )
-from ..results import EventResult, MessageResult, Propagation
+from ..results import EventResult, GroupUsage, MessageResult, Propagation
 
 JSONValue: TypeAlias = (
     None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -663,7 +663,9 @@ def encode_result(result: EventResult | None) -> JSONValue:
         "type": "event",
         "propagation": result.propagation.value,
     }
-    if isinstance(result, MessageResult):
+    if isinstance(result, GroupUsage):
+        data["type"] = "group_usage"
+    elif isinstance(result, MessageResult):
         data.update(
             {
                 "type": "message",
@@ -694,6 +696,8 @@ def decode_result(data: Any) -> EventResult | None:
         propagation = Propagation(str(data["propagation"]))
         if data.get("type") == "event":
             return EventResult(propagation=propagation)
+        if data.get("type") == "group_usage":
+            return GroupUsage(propagation=propagation)
         if data.get("type") == "message":
             message = data["message"]
             if not isinstance(message, list):

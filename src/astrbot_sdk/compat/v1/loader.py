@@ -666,6 +666,7 @@ def _wrap_handler(
     """Wrap one legacy handler into the new invoke contract."""
 
     async def wrapper(event, **kwargs):
+        bare_group = bool(kwargs.pop("bare_group", False))
         facade = build_legacy_event(event, plugin.context)
         try:
             for custom_filter in custom_filters or []:
@@ -679,6 +680,11 @@ def _wrap_handler(
                     accepted = await accepted
                 if not accepted:
                     return
+            if bare_group and spec is not None and spec.group:
+                from ...results import GroupUsage, Propagation
+
+                yield GroupUsage(propagation=Propagation.STOP)
+                return
             if spec is not None and spec.kind is HandlerKind.COMMAND:
                 kwargs = {
                     **_parse_legacy_args(method, spec, facade.message_str),
