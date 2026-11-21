@@ -12,9 +12,11 @@ from astrbot_sdk.compat.v1.errors import IsolationUnsupportedError
 from astrbot_sdk.compat.v1.host_snapshot import (
     AstrbotConfigMgrFacade,
     PlatformManagerFacade,
+    ProviderManagerFacade,
 )
 from astrbot_sdk.compat.v1.kb import KbManagerFacade
 from astrbot_sdk.compat.v1.message_history import MessageHistoryManagerFacade
+from astrbot_sdk.compat.v1.provider import ProviderType
 
 SNAPSHOT = {
     "platforms": [
@@ -207,3 +209,53 @@ async def test_message_history_facade_calls() -> None:
     capability, operation, payload = facade_ctx._ctx.calls[-1]
     assert (capability, operation) == ("message.history", "delete")
     assert payload["offset_sec"] == 86400
+
+
+@pytest.mark.asyncio
+async def test_provider_manager_facade_writes() -> None:
+    sdk_ctx = FakeSDKContext()
+    snapshot = {
+        "providers": {
+            "chat": [{"id": "chat-1", "model": "gpt-4o", "type": "openai"}],
+            "speech_to_text": [],
+            "text_to_speech": [],
+            "embedding": [],
+        },
+        "provider_defaults": {},
+        "provider_umo_prefs": {},
+    }
+    mgr = ProviderManagerFacade(sdk_ctx, snapshot)
+    await mgr.set_provider("chat-1", ProviderType.CHAT_COMPLETION, "webchat:u1")
+    assert sdk_ctx.calls[-1] == (
+        "provider.write",
+        "set_provider",
+        {
+            "provider_id": "chat-1",
+            "provider_type": "chat_completion",
+            "umo": "webchat:u1",
+        },
+    )
+    resolved = mgr.get_using_provider(ProviderType.CHAT_COMPLETION, "webchat:u1")
+    assert resolved is not None and resolved.get_provider_id() == "chat-1"
+
+    await mgr.create_provider({"id": "chat-2", "type": "openai"})
+    assert sdk_ctx.calls[-1] == (
+        "provider.write",
+        "create_provider",
+        {"new_config": {"id": "chat-2", "type": "openai"}},
+    )
+    await mgr.update_provider("chat-2", {"id": "chat-2", "model": "gpt-4.1"})
+    assert sdk_ctx.calls[-1] == (
+        "provider.write",
+        "update_provider",
+        {
+            "origin_provider_id": "chat-2",
+            "new_config": {"id": "chat-2", "model": "gpt-4.1"},
+        },
+    )
+    await mgr.delete_provider(provider_id="chat-2")
+    assert sdk_ctx.calls[-1] == (
+        "provider.write",
+        "delete_provider",
+        {"provider_id": "chat-2", "provider_source_id": None},
+    )
