@@ -45,12 +45,14 @@ class CommandFilter:
         command_name: str,
         alias: set | None = None,
         is_group: bool = False,
+        is_sub_command: bool = False,
     ) -> None:
         self.command_name = command_name
         self.alias = alias or set()
         # Group anchors render the usage tree on a bare group-name message
         # (in-process CommandGroupFilter) instead of running the handler.
         self.is_group = is_group
+        self.is_sub_command = is_sub_command
 
 
 class RegexFilter:
@@ -118,7 +120,9 @@ class _CommandGroup:
         aliases = {f"{self.prefix} {a}" for a in (alias or set())}
 
         def decorator(handler: Any) -> Any:
-            handler = _accumulate(handler, CommandFilter(full, aliases))
+            handler = _accumulate(
+                handler, CommandFilter(full, aliases, is_sub_command=True)
+            )
             for marker in self.filters:
                 handler = _accumulate(handler, marker)
             return handler

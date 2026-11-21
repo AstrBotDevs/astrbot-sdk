@@ -644,6 +644,8 @@ class StdioPluginServer:
                     details = {
                         "path": spec.path,
                         "group": spec.group,
+                        "group_custom_filters": spec.group_custom_filters,
+                        "sub_command": spec.sub_command,
                         "aliases": list(spec.aliases),
                         "message_types": [
                             message_type.value for message_type in spec.message_types

@@ -106,6 +106,8 @@ class HandlerSpec:
     # Legacy command groups: the handler is a registration anchor only; the
     # host renders the group's usage tree on a bare group-name message.
     group: bool = False
+    group_custom_filters: bool = False
+    sub_command: bool = False
     tool_name: str | None = None
     resumable: bool = False
     streaming_input: bool = False
@@ -650,6 +652,8 @@ def discover_handlers(plugin: object) -> tuple[HandlerRegistration, ...]:
             path=spec.path,
             aliases=spec.aliases,
             group=spec.group,
+            group_custom_filters=spec.group_custom_filters,
+            sub_command=spec.sub_command,
             message_types=spec.message_types,
             platforms=spec.platforms,
             roles=spec.roles,

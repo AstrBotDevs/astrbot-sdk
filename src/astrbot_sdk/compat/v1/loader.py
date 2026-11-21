@@ -387,11 +387,19 @@ def _compile_filters(
             custom_filters.append(spec.custom_filter)
 
     if path is not None:
+        sub_command = bool(
+            filters
+            and isinstance(filters[0], CommandFilter)
+            and filters[0].is_sub_command
+        )
+        group_custom_filters = bool(group and custom_filters)
         return (
             HandlerSpec(
                 kind=HandlerKind.COMMAND,
                 path=path,
                 group=group,
+                group_custom_filters=group_custom_filters,
+                sub_command=sub_command,
                 aliases=aliases,
                 message_types=tuple(message_types),
                 platforms=tuple(platforms),
@@ -921,6 +929,8 @@ def load_legacy_plugin(
             description=inspect.getdoc(method),
             path=spec.path,
             group=spec.group,
+            group_custom_filters=spec.group_custom_filters,
+            sub_command=spec.sub_command,
             aliases=spec.aliases,
             tool_name=spec.tool_name,
             message_types=spec.message_types,
