@@ -50,6 +50,7 @@ class FakeSDKContext:
         self.logger = logging.getLogger("test")
         self.calls: list[tuple[str, str, dict]] = []
         self.cron_handlers: dict = {}
+        self.capabilities = None
         self._responses = responses or {}
 
     async def _invoke_capability(self, capability, operation, payload):
@@ -259,3 +260,122 @@ async def test_provider_manager_facade_writes() -> None:
         "delete_provider",
         {"provider_id": "chat-2", "provider_source_id": None},
     )
+
+
+def test_compat_context_locale_resolution() -> None:
+    from astrbot_sdk.compat.v1.star import Context as LegacyContext
+
+    snapshot = {
+        "config": {"platform_settings": {"locale": "invalid"}},
+        "config_profiles": {
+            "en": {"platform_settings": {"locale": "en-US"}},
+            "zh": {"platform_settings": {"locale": "zh-CN"}},
+        },
+        "config_routes": {
+            "webchat:*:en_user": "en",
+            "webchat:*:zh_user": "zh",
+        },
+    }
+    ctx = LegacyContext(FakeSDKContext(), snapshot=snapshot)
+    assert ctx.locale() == "zh-CN"
+    assert ctx.locale("webchat:FriendMessage:en_user") == "en-US"
+    assert ctx.locale("webchat:FriendMessage:zh_user") == "zh-CN"
+
+
+@pytest.mark.asyncio
+async def test_shared_preferences_sp_store_facade() -> None:
+    from astrbot_sdk.capabilities import CapabilitySet
+    from astrbot_sdk.compat.v1.api import _SharedPreferences
+
+    sdk_ctx = FakeSDKContext(
+        {
+            ("sp.store", "get"): {"value": {"v": 42}},
+            ("sp.store", "range_get"): {
+                "entries": [
+                    {
+                        "scope": "plugin",
+                        "scope_id": "legacy_demo",
+                        "key": "k1",
+                        "value": {"v": 42},
+                    }
+                ]
+            },
+        }
+    )
+    sdk_ctx.capabilities = CapabilitySet.from_ids("sp.store")
+    prev_ctx = _SharedPreferences._ctx
+    _SharedPreferences.initialize(sdk_ctx)
+    sp_facade = _SharedPreferences()
+    try:
+        await sp_facade.put_async("plugin", "legacy_demo", "k1", {"v": 42})
+        assert sdk_ctx.calls[-1] == (
+            "sp.store",
+            "put",
+            {
+                "scope": "plugin",
+                "scope_id": "legacy_demo",
+                "key": "k1",
+                "value": {"v": 42},
+            },
+        )
+        assert await sp_facade.get_async("plugin", "legacy_demo", "k1") == {"v": 42}
+        entries = await sp_facade.range_get_async("plugin", "legacy_demo")
+        assert len(entries) == 1
+        assert entries[0].key == "k1"
+        assert entries[0].value == {"val": {"v": 42}}
+        await sp_facade.session_put("webchat:FriendMessage:u1", "k2", "v2")
+        assert sdk_ctx.calls[-1] == (
+            "sp.store",
+            "put",
+            {
+                "scope": "umo",
+                "scope_id": "webchat:FriendMessage:u1",
+                "key": "k2",
+                "value": "v2",
+            },
+        )
+        await sp_facade.global_put("g1", 99)
+        assert sdk_ctx.calls[-1] == (
+            "sp.store",
+            "put",
+            {"scope": "global", "scope_id": "global", "key": "g1", "value": 99},
+        )
+        await sp_facade.remove_async("plugin", "legacy_demo", "k1")
+        assert sdk_ctx.calls[-1] == (
+            "sp.store",
+            "remove",
+            {"scope": "plugin", "scope_id": "legacy_demo", "key": "k1"},
+        )
+    finally:
+        _SharedPreferences.initialize(prev_ctx)
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_loop_agent_forwards_umo() -> None:
+    from types import SimpleNamespace
+
+    from astrbot_sdk.capabilities import CapabilitySet
+    from astrbot_sdk.compat.v1.star import Context as LegacyContext
+    from astrbot_sdk.llm import AgentResponse
+    from tests.test_conversations import make_context, make_event
+
+    captured: list[dict] = []
+
+    async def invoker(capability: str, operation: str, payload: dict):
+        captured.append(payload)
+        return {"response": AgentResponse(text="agent-done")}
+
+    sdk_ctx = make_context(
+        grants=CapabilitySet.from_ids("llm.agent", "llm.generate"),
+        invoker=invoker,
+    )
+    compat_ctx = LegacyContext(sdk_ctx, snapshot={})
+    sdk_ev = make_event()
+    legacy_ev = SimpleNamespace(_event=sdk_ev, unified_msg_origin=str(sdk_ev.umo))
+    resp = await compat_ctx.tool_loop_agent(
+        event=legacy_ev,  # type: ignore[arg-type]
+        chat_provider_id="chat-1",
+        prompt="hi",
+    )
+    assert resp.completion_text == "agent-done"
+    assert captured[0]["umo"] == sdk_ev.umo

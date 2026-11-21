@@ -233,3 +233,24 @@ class TestPlugin(Plugin):
         assert seen[0]["tools"] is None
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_derives_umo_from_request_event() -> None:
+    """run_agent forwards request.event.umo even when ambient context is empty."""
+    from astrbot_sdk.llm import AgentRequest, AgentResponse
+
+    captured: list[dict[str, Any]] = []
+
+    async def invoker(capability: str, operation: str, payload: dict[str, Any]):
+        captured.append(payload)
+        return {"response": AgentResponse(text="ok")}
+
+    ctx = make_context(
+        grants=CapabilitySet.from_ids("llm.agent", "llm.generate"),
+        invoker=invoker,
+    )
+    msg_event = make_event()
+    result = await ctx.llm.run_agent(AgentRequest(input="hi", event=msg_event))
+    assert result.text == "ok"
+    assert captured[0]["umo"] == msg_event.umo

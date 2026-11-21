@@ -209,3 +209,25 @@ def test_spawn_child_reanchors_virtual_roots(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "anchored" in result.stdout
+
+
+def test_external_store_ignores_mismatched_astrbot_data_path(
+    remote_env,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom store outside ASTRBOT_DATA_PATH falls back to virtual root anchoring."""
+    _, ctx = remote_env
+    data_dir = tmp_path / "astrbot_root" / "data"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("ASTRBOT_DATA_PATH", str(data_dir))
+    external_plugin = tmp_path / "external_store" / PLUGIN_NAME
+    _write_plugin(external_plugin, value=9)
+
+    load_legacy_plugin(external_plugin, ctx=ctx)
+
+    package = f"data.plugins.{PLUGIN_NAME}"
+    assert sys.modules[f"{package}.main"].VALUE == 9
+    assert str(external_plugin.parent) in (
+        os.environ["ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS"].split(os.pathsep)
+    )

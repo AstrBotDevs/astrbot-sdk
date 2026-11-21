@@ -267,3 +267,21 @@ async def test_ask_sends_message_then_waits() -> None:
 
     operations = [call[1] for call in host.calls if call[0] == "message.send"]
     assert operations == ["send"]
+
+
+@pytest.mark.asyncio
+async def test_scoped_context_shares_session_waiters() -> None:
+    """Waiters armed inside a scoped handler context stay visible to root.sessions."""
+    host = _Host()
+    root_ctx, root_sessions = make_service(host)
+    scoped_ctx = root_ctx.scoped_for_invocation("call-1")
+    event = make_event()
+
+    async with scoped_ctx.sessions.wait(event) as session:
+        matches = root_sessions._consider(event)
+        assert len(matches) == 1
+        task = asyncio.create_task(session.next())
+        await asyncio.sleep(0)
+        root_sessions._deliver(matches[0]["waiter_id"], make_event(text="scoped-reply"))
+        got = await task
+        assert got.text == "scoped-reply"

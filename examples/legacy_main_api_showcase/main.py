@@ -10,14 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.triggers.date import DateTrigger
-from astrbot.api import AstrBotConfig, FunctionTool, html_renderer, logger, sp
-from astrbot.api.all import (
-    MessageChain,
-    Plain,
-    ProviderType,
+from astrbot.api import (
+    AstrBotConfig,
+    FunctionTool,
     ToolSet,
+    html_renderer,
+    logger,
+    sp,
 )
+from astrbot.api.all import MessageChain, Plain
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderType
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import request
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
@@ -173,7 +176,10 @@ class LegacyMainApiShowcasePlugin(Star):
         sp_after = await sp.get_async("plugin", "legacy_demo", "k1", "gone")
         sp_ok = (
             sp_val == {"v": 42}
-            and any(entry.get("key") == "k1" for entry in sp_range)
+            and any(
+                entry.key == "k1" and entry.value.get("val") == {"v": 42}
+                for entry in sp_range
+            )
             and sp_after == "gone"
         )
 

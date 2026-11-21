@@ -103,7 +103,7 @@ class FullApiShowcasePlugin(Plugin[ShowcaseConfig]):
             await asyncio.sleep(0)
             self._startup_task_done.set()
 
-        self.ctx.tasks.spawn(_bg_job(), name="showcase_startup_bg")
+        self.ctx.tasks.spawn("showcase_startup_bg", _bg_job())
 
     @lifecycle.validate_config
     async def on_validate_config(self, candidate: ShowcaseConfig) -> None:

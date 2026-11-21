@@ -280,3 +280,36 @@ class TestPlugin(Plugin):
         assert not called
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_ignores_late_cancel_frame() -> None:
+    """Late CancelFrame after inbound completion must not crash _read_frames."""
+    import asyncio
+
+    from astrbot_sdk.protocol import CancelFrame, encode_frame
+    from astrbot_sdk.runtime.peer import Peer
+
+    lines = [encode_frame(CancelFrame(id="runner:finished-1")), None]
+    index = 0
+
+    class _FakeTransport:
+        async def read(self):
+            nonlocal index
+            item = lines[index]
+            index += 1
+            return item
+
+        async def write(self, data: str) -> None:
+            _ = data
+
+    client = StdioPluginClient(Path("."))
+    client._transport = _FakeTransport()  # type: ignore[assignment]
+    client._peer = Peer(
+        send=lambda frame: asyncio.sleep(0),
+        request_handler=lambda frame: asyncio.sleep(0),
+        request_id_prefix="host:",
+        remote_error_factory=RemotePluginError,
+    )
+    await client._read_frames()
+    await client._peer.close()
