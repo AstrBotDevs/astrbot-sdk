@@ -12,6 +12,7 @@ runtime:
 capabilities:
   required:
     - id: message.receive
+    - id: message.observe
     - id: message.send
     - id: message.modify
     - id: message.wait
@@ -20,6 +21,7 @@ capabilities:
     - id: plugin.inspect
     - id: render.image
     - id: llm.tool.register
+    - id: llm.observe
     - id: llm.generate
     - id: llm.embed
     - id: llm.agent
