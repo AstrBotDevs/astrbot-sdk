@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, get_args, get_origin, get_type_hints
 
@@ -46,6 +46,8 @@ class ToolDefinition:
     name: str
     description: str
     params: tuple[ToolParam, ...] = ()
+    resumable: bool = False
+    streaming_input: bool = False
 
 
 @register_protocol_dataclass
@@ -283,3 +285,76 @@ class ToolService:
             {"name": tool.name, "handler_id": tool.handler_id},
         )
         self._ctx._unregister_dynamic_tool(tool.handler_id)
+
+    async def update_runtime_tools(
+        self,
+        tools: Sequence[tuple[ToolDefinition, ToolHandler] | Tool],
+    ) -> list[ToolRef]:
+        """Replace the plugin's dynamic runtime tool catalog atomically.
+
+        Args:
+            tools: Sequence of `(ToolDefinition, handler)` pairs or `Tool` objects.
+
+        Returns:
+            List of registered `ToolRef` handles.
+        """
+        entries: list[tuple[ToolDefinition, ToolHandler, str]] = []
+        for item in tools:
+            if isinstance(item, Tool):
+                if not isinstance(item.name, str) or not item.name:
+                    raise InvalidPluginDefinition("tool class must declare a name")
+                handler = item.call
+                params = (
+                    item.params
+                    if item.params is not None
+                    else tuple(
+                        tool_params_schema(
+                            handler,
+                            handler_label=f"tool {item.name!r}",
+                        )
+                    )
+                )
+                defn = ToolDefinition(
+                    name=item.name,
+                    description=(
+                        item.description or _description_of(handler) or item.name
+                    ),
+                    params=params,
+                )
+            else:
+                defn, handler = item
+                if not inspect.iscoroutinefunction(handler):
+                    raise InvalidPluginDefinition("runtime tool handler must be async")
+                if not defn.params:
+                    defn = ToolDefinition(
+                        name=defn.name,
+                        description=defn.description,
+                        params=tuple(
+                            tool_params_schema(
+                                handler,
+                                handler_label=f"tool {defn.name!r}",
+                            )
+                        ),
+                        resumable=defn.resumable,
+                        streaming_input=defn.streaming_input,
+                    )
+            handler_id = f"runtime:{defn.name}"
+            entries.append((defn, handler, handler_id))
+
+        for _, handler, handler_id in entries:
+            self._ctx._register_dynamic_tool(handler_id, handler)
+
+        await self._ctx._invoke_capability(
+            "llm.tool.register",
+            "replace_runtime",
+            {
+                "tools": [
+                    {"definition": defn, "handler_id": handler_id}
+                    for defn, _, handler_id in entries
+                ]
+            },
+        )
+        return [
+            ToolRef(name=defn.name, handler_id=handler_id)
+            for defn, _, handler_id in entries
+        ]

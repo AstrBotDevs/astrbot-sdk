@@ -1,9 +1,9 @@
 [project]
 name = "astrbot-sdk"
 version = "0.1.0"
-description = "Public SDK and plugin runtime for AstrBot"
+description = "Public Rust-backed and Python SDK and plugin runtime for AstrBot"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "packaging>=24.2",
     "pyyaml>=6.0",
@@ -11,7 +11,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+schema = [
+    "pydantic>=2,<3",
+]
 test = [
+    "pydantic>=2,<3",
     "pytest>=8.4",
     "pytest-asyncio>=1.1",
     # Legacy compat replay runs handlers in real Quart/Starlette contexts.
@@ -22,11 +26,13 @@ test = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/astrbot_sdk"]
+[tool.maturin]
+manifest-path = "rust/astrbot-py/Cargo.toml"
+python-source = "src"
+module-name = "astrbot_sdk._native"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -34,7 +40,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "ASYNC"]

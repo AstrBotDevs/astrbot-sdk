@@ -6,12 +6,14 @@ import inspect
 import logging
 import os
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from ..capabilities import CapabilityGrant, CapabilitySet
+from ..context import _AMBIENT_CALL_ID
 from ..errors import (
     AstrBotSDKError,
     HostUnavailable,
@@ -44,6 +46,17 @@ from .peer import Peer
 from .transport import FrameTransport, StdioTransport
 
 _SUPPORTED_PARAM_TYPES = {"str": str, "int": int, "float": float, "bool": bool}
+_SUPPORTED_FEATURES = (
+    "cancel_v1",
+    "capability_update_v1",
+    "dynamic_tools_v1",
+    "external_attach_v1",
+    "live_config_v1",
+    "plugin_service_v1",
+    "resume_stream_v1",
+    "scoped_host_v1",
+)
+_RESUMABLE_GRACE_SECONDS = 30.0
 
 
 def _is_message_event_annotation(annotation: Any) -> bool:
@@ -219,11 +232,19 @@ class StdioPluginServer:
             str,
             asyncio.Queue[ProtocolFrame | Exception],
         ] = {}
+        self._resumable_streams: dict[str, dict[str, Any]] = {}
+        self._stop_reason = "shutdown"
+        self._tool_discovery_version = 0
         self._initializing = False
         self._closing = False
 
-    async def serve(self) -> None:
+    async def serve(self, *, stop_on_exit: bool = True) -> None:
         """Read frames until shutdown or EOF.
+
+        Args:
+            stop_on_exit: Stop the loaded plugin and close the peer when the
+                read loop exits. External transports with reconnect grace pass
+                False on transient disconnects.
 
         Raises:
             BrokenPipeError: The Host closes stdout while a response is written.
@@ -245,21 +266,49 @@ class StdioPluginServer:
                 frame = None
                 try:
                     frame = decode_frame(line)
-                    if isinstance(frame, RequestFrame) and frame.method == "invoke":
+                    if isinstance(frame, RequestFrame) and frame.method in (
+                        "invoke",
+                        "resumable.invoke",
+                    ):
                         if self.loaded_plugin is None:
                             raise InvalidRequest("Runner is not initialized")
                         if frame.id in self._invocations:
                             raise InvalidRequest(f"duplicate invocation id: {frame.id}")
                         acknowledgements: asyncio.Queue[int] = asyncio.Queue()
+                        resumable = frame.method == "resumable.invoke" or bool(
+                            frame.params.get("resumable")
+                        )
+                        if resumable:
+                            self._prune_resumable_streams()
+                            self._resumable_streams[frame.id] = {
+                                "last_unacked": None,
+                                "terminal": None,
+                                "last_acked_seq": 0,
+                                "finished_at": None,
+                            }
                         task = asyncio.create_task(
                             self._run_web_invocation(frame, acknowledgements)
                             if frame.params.get("web") or frame.params.get("views")
-                            else self._run_invocation(frame, acknowledgements)
+                            else self._run_invocation(
+                                frame,
+                                acknowledgements,
+                                resumable=resumable,
+                            )
                         )
                         self._invocations[frame.id] = (task, acknowledgements)
                     elif await self._peer.receive(frame):
                         continue
                     elif isinstance(frame, AckFrame):
+                        resumable_state = self._resumable_streams.get(frame.id)
+                        if resumable_state is not None:
+                            if frame.sequence > resumable_state["last_acked_seq"]:
+                                resumable_state["last_acked_seq"] = frame.sequence
+                            last_unacked = resumable_state["last_unacked"]
+                            if (
+                                isinstance(last_unacked, YieldFrame)
+                                and last_unacked.sequence <= frame.sequence
+                            ):
+                                resumable_state["last_unacked"] = None
                         invocation = self._invocations.get(frame.id)
                         if invocation is not None:
                             invocation[1].put_nowait(frame.sequence)
@@ -288,8 +337,9 @@ class StdioPluginServer:
                         )
                     )
         finally:
-            await self._stop_plugin()
-            await self._peer.close()
+            if stop_on_exit or self._closing:
+                await self._stop_plugin()
+                await self._peer.close()
 
     async def _send(
         self,
@@ -315,11 +365,107 @@ class StdioPluginServer:
             InvalidRequest: The method is unknown or invalid for the current state.
         """
         if frame.method == "ping":
-            # Liveness probe for the Host supervisor; also serves as the
-            # capability probe for future non-Python runners.
+            # Liveness probe for the Host supervisor; also runs health check
+            # when initialized.
+            if self.loaded_plugin is not None and not self.legacy:
+                await self.loaded_plugin.check_health()
             return {"protocol_version": PROTOCOL_VERSION}
         if frame.method == "initialize":
             return await self._initialize(frame)
+        if frame.method == "validate_config":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            if self.legacy:
+                return {"valid": True}
+            config = decode_value(frame.params.get("config"))
+            await self.loaded_plugin.validate_config(config)
+            return {"valid": True}
+        if frame.method == "configure":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            if self.legacy:
+                raise InvalidRequest("legacy plugins do not support live configure")
+            config = decode_value(frame.params.get("config"))
+            await self.loaded_plugin.reconfigure(config)
+            return {"configured": True}
+        if frame.method == "capabilities.update":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            raw_grants = frame.params.get("capabilities", [])
+            if not isinstance(raw_grants, list):
+                raise InvalidRequest("capabilities must be a list")
+            grants: list[CapabilityGrant] = []
+            for item in raw_grants:
+                if not isinstance(item, Mapping):
+                    raise InvalidRequest("capability grant must be an object")
+                scope = decode_value(item.get("scope", {}))
+                if not isinstance(scope, Mapping):
+                    raise InvalidRequest("capability scope must be an object")
+                grants.append(CapabilityGrant(id=str(item["id"]), scope=scope))
+            target_ctx = getattr(self.loaded_plugin, "sdk_ctx", None)
+            if target_ctx is None:
+                target_ctx = getattr(self.loaded_plugin.instance, "ctx", None)
+            if target_ctx is None:
+                raise InvalidRequest("plugin context is unavailable")
+            updated = CapabilitySet(grants)
+            target_ctx._update_capabilities(updated)
+            return {"capabilities": list(updated)}
+        if frame.method == "tools.discover":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            if self.legacy:
+                return {"version": self._tool_discovery_version, "tools": []}
+            discovered = await self.loaded_plugin.discover_tools()
+            self._tool_discovery_version += 1
+            serialized_tools: list[dict[str, Any]] = []
+            for item in discovered:
+                if isinstance(item, Mapping):
+                    serialized_tools.append(dict(encode_value(dict(item))))
+                else:
+                    serialized_tools.append(
+                        {
+                            "name": str(getattr(item, "name", "")),
+                            "description": str(getattr(item, "description", "")),
+                            "params": [
+                                {
+                                    "name": param.name,
+                                    "type": param.type,
+                                    "description": param.description,
+                                    "required": param.required,
+                                }
+                                for param in getattr(item, "params", ())
+                            ],
+                            "resumable": bool(getattr(item, "resumable", False)),
+                            "streaming_input": bool(
+                                getattr(item, "streaming_input", False)
+                            ),
+                        }
+                    )
+            return {
+                "version": self._tool_discovery_version,
+                "tools": serialized_tools,
+            }
+        if frame.method == "invoke_service":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            if self.legacy:
+                raise InvalidRequest("legacy plugins do not export services")
+            service_name = str(
+                frame.params.get("service") or frame.params.get("handler_id") or ""
+            )
+            if not service_name:
+                raise InvalidRequest("service name must be a non-empty string")
+            payload = decode_value(frame.params.get("input", {}))
+            if payload is None:
+                payload = {}
+            if not isinstance(payload, Mapping):
+                raise InvalidRequest("service input must be an object")
+            result = await self.loaded_plugin.invoke_service(
+                service_name,
+                payload,
+                call_id=frame.id,
+            )
+            return encode_value(result)
         if frame.method == "invoke_tool":
             if self.loaded_plugin is None:
                 raise InvalidRequest("Runner is not initialized")
@@ -327,11 +473,19 @@ class StdioPluginServer:
             args = decode_value(frame.params.get("args", {}))
             if not isinstance(args, Mapping):
                 raise InvalidRequest("tool args must be an object")
-            result = await self.loaded_plugin.invoke_tool(
-                str(frame.params["handler_id"]),
-                call,
-                args,
-            )
+            if self.legacy:
+                result = await self.loaded_plugin.invoke_tool(
+                    str(frame.params["handler_id"]),
+                    call,
+                    args,
+                )
+            else:
+                result = await self.loaded_plugin.invoke_tool(
+                    str(frame.params["handler_id"]),
+                    call,
+                    args,
+                    call_id=frame.id,
+                )
             return encode_value(result)
         if frame.method == "invoke_hook":
             if self.loaded_plugin is None:
@@ -342,11 +496,19 @@ class StdioPluginServer:
             payload = decode_value(frame.params.get("payload", {}))
             if not isinstance(payload, Mapping):
                 raise InvalidRequest("hook payload must be an object")
-            result = await self.loaded_plugin.invoke_hook(
-                str(frame.params["handler_id"]),
-                event,
-                payload,
-            )
+            if self.legacy:
+                result = await self.loaded_plugin.invoke_hook(
+                    str(frame.params["handler_id"]),
+                    event,
+                    payload,
+                )
+            else:
+                result = await self.loaded_plugin.invoke_hook(
+                    str(frame.params["handler_id"]),
+                    event,
+                    payload,
+                    call_id=frame.id,
+                )
             return encode_value(result)
         if frame.method == "invoke_cron":
             if self.loaded_plugin is None:
@@ -377,6 +539,7 @@ class StdioPluginServer:
             self._session_service()._timeout(str(frame.params["waiter_id"]))
             return None
         if frame.method == "shutdown":
+            self._stop_reason = str(frame.params.get("reason") or "shutdown")
             await self._stop_plugin()
             self._closing = True
             return None
@@ -448,13 +611,34 @@ class StdioPluginServer:
                     granted_capabilities=CapabilitySet(grants),
                     host_capability_invoker=self._invoke_host_capability,
                     host_capability_stream_invoker=self._invoke_host_capability_stream,
+                    host_service_invoker=self._invoke_host_service,
                 )
             await loaded.start()
             self.loaded_plugin = loaded
 
             handlers: list[dict[str, Any]] = []
+            services: list[dict[str, Any]] = []
             for registration in loaded.registrations:
                 spec = registration.spec
+                if spec.kind in (HandlerKind.SERVICE, HandlerKind.DIRECT_SERVICE):
+                    services.append(
+                        {
+                            "handler_id": registration.id,
+                            "name": spec.service_name or registration.id,
+                            "description": spec.description or "",
+                            "mode": (
+                                "direct"
+                                if spec.kind is HandlerKind.DIRECT_SERVICE
+                                else "host_scoped"
+                            ),
+                            "input_schema": (
+                                dict(spec.input_schema)
+                                if spec.input_schema is not None
+                                else None
+                            ),
+                        }
+                    )
+                    continue
                 details: dict[str, Any] = {}
                 if spec.kind is HandlerKind.COMMAND:
                     details = {
@@ -481,6 +665,8 @@ class StdioPluginServer:
                     details = {
                         "name": spec.tool_name,
                         "description": spec.description,
+                        "resumable": bool(spec.resumable),
+                        "streaming_input": bool(spec.streaming_input),
                         "params": precomputed
                         if precomputed is not None
                         else [
@@ -516,6 +702,15 @@ class StdioPluginServer:
                     }
                 )
 
+            requested_features = frame.params.get("features")
+            if isinstance(requested_features, list) and requested_features:
+                supported = set(_SUPPORTED_FEATURES)
+                features = [
+                    str(item) for item in requested_features if str(item) in supported
+                ]
+            else:
+                features = list(_SUPPORTED_FEATURES)
+
             # Resolve the SDK context: legacy loaded plugins expose it as
             # sdk_ctx (their Star instance may carry an unrelated own "ctx"
             # attribute), new-style plugins as instance.ctx.
@@ -531,6 +726,7 @@ class StdioPluginServer:
                     "schema_version": loaded.metadata.schema_version,
                 },
                 "handlers": handlers,
+                "services": services,
                 "web_routes": [
                     {
                         "route": route.route,
@@ -542,6 +738,7 @@ class StdioPluginServer:
                 if getattr(handshake_ctx, "web", None) is not None
                 else [],
                 "capabilities": list(handshake_ctx.capabilities),
+                "features": features,
             }
         finally:
             self._initializing = False
@@ -573,6 +770,7 @@ class StdioPluginServer:
             data_dir=data_dir,
             _host_capability_invoker=self._invoke_host_capability,
             _host_capability_stream_invoker=self._invoke_host_capability_stream,
+            _host_service_invoker=self._invoke_host_service,
         )
         return load_legacy_plugin(
             self.plugin_root,
@@ -598,14 +796,34 @@ class StdioPluginServer:
         Returns:
             Decoded Host capability result.
         """
-        result = await self._peer.request(
-            "capability.invoke",
-            {
-                "capability": capability_id,
-                "operation": operation,
-                "input": encode_value(dict(payload)),
-            },
-        )
+        params: dict[str, Any] = {
+            "capability": capability_id,
+            "operation": operation,
+            "input": encode_value(dict(payload)),
+        }
+        parent_call_id = _AMBIENT_CALL_ID.get()
+        if parent_call_id is not None:
+            params["parent_call_id"] = parent_call_id
+        result = await self._peer.request("capability.invoke", params)
+        return decode_value(result)
+
+    async def _invoke_host_service(
+        self,
+        plugin_id: str,
+        service: str,
+        payload: Mapping[str, Any],
+        parent_call_id: str | None = None,
+    ) -> Any:
+        """Route one cross-plugin service invocation through the Host peer."""
+        params: dict[str, Any] = {
+            "plugin_id": plugin_id,
+            "service": service,
+            "input": encode_value(dict(payload)),
+        }
+        resolved_call_id = parent_call_id or _AMBIENT_CALL_ID.get()
+        if resolved_call_id is not None:
+            params["parent_call_id"] = resolved_call_id
+        result = await self._peer.request("plugin.service.invoke", params)
         return decode_value(result)
 
     async def _run_web_invocation(
@@ -640,7 +858,13 @@ class StdioPluginServer:
                 request = decode_value(frame.params.get("request"))
                 if not isinstance(request, WebRequestInfo):
                     raise InvalidRequest("web request must be a WebRequestInfo")
-                stream = self.loaded_plugin.invoke_web(request)
+                if self.legacy:
+                    stream = self.loaded_plugin.invoke_web(request)
+                else:
+                    stream = self.loaded_plugin.invoke_web(
+                        request,
+                        call_id=frame.id,
+                    )
             sequence = 0
             async for item in stream:
                 sequence += 1
@@ -674,17 +898,53 @@ class StdioPluginServer:
         finally:
             self._invocations.pop(frame.id, None)
 
+    def rebind_transport(self, transport: FrameTransport) -> None:
+        """Bind a new transport after a resumable external reconnect."""
+        self._transport = transport
+
+    def _prune_resumable_streams(self) -> None:
+        """Discard resumable stream states whose grace window has elapsed."""
+        now = time.monotonic()
+        expired = [
+            call_id
+            for call_id, state in self._resumable_streams.items()
+            if state["finished_at"] is not None
+            and now - state["finished_at"] > _RESUMABLE_GRACE_SECONDS
+        ]
+        for call_id in expired:
+            self._resumable_streams.pop(call_id, None)
+
+    def stream_replay_frames(self) -> list[ProtocolFrame]:
+        """Collect unacknowledged yields and terminal frames for replay."""
+        self._prune_resumable_streams()
+        replay: list[ProtocolFrame] = []
+        for state in self._resumable_streams.values():
+            last_unacked = state["last_unacked"]
+            if (
+                isinstance(last_unacked, YieldFrame)
+                and last_unacked.sequence > state["last_acked_seq"]
+            ):
+                replay.append(last_unacked)
+            terminal = state["terminal"]
+            if terminal is not None:
+                replay.append(terminal)
+        return replay
+
     async def _run_invocation(
         self,
         frame: RequestFrame,
         acknowledgements: asyncio.Queue[int],
+        *,
+        resumable: bool = False,
     ) -> None:
         """Invoke a handler and suspend after each yielded result.
 
         Args:
             frame: Invoke request.
             acknowledgements: Sequence acknowledgements from the Host.
+            resumable: Retain bounded 1-unacked-yield replay state on disconnect.
         """
+        resumable_state = self._resumable_streams.get(frame.id) if resumable else None
         try:
             if self.loaded_plugin is None:
                 raise InvalidRequest("Runner is not initialized")
@@ -701,41 +961,64 @@ class StdioPluginServer:
                 str(key): decode_value(value) for key, value in raw_kwargs.items()
             }
             sequence = 0
-            async for result in self.loaded_plugin.invoke(
-                handler_id,
-                *args,
-                **kwargs,
-            ):
-                sequence += 1
-                await self._send(
-                    YieldFrame(
-                        id=frame.id,
-                        sequence=sequence,
-                        result=encode_result(result),
-                    )
+            stream = (
+                self.loaded_plugin.invoke(handler_id, *args, **kwargs)
+                if self.legacy
+                else self.loaded_plugin.invoke(
+                    handler_id,
+                    *args,
+                    call_id=frame.id,
+                    **kwargs,
                 )
+            )
+            async for result in stream:
+                sequence += 1
+                yield_frame = YieldFrame(
+                    id=frame.id,
+                    sequence=sequence,
+                    result=encode_result(result),
+                )
+                if resumable_state is not None:
+                    resumable_state["last_unacked"] = yield_frame
+                await self._send(yield_frame)
                 if result is not None and result.propagation is Propagation.STOP:
+                    if resumable_state is not None:
+                        resumable_state["last_acked_seq"] = sequence
+                        resumable_state["last_unacked"] = None
                     continue
                 acknowledged_sequence = await acknowledgements.get()
                 if acknowledged_sequence != sequence:
                     raise InvalidRequest(
                         "yield acknowledgement sequence does not match"
                     )
-            await self._send(ResponseFrame(id=frame.id, result=None))
+                if resumable_state is not None:
+                    resumable_state["last_acked_seq"] = acknowledged_sequence
+                    resumable_state["last_unacked"] = None
+            terminal = ResponseFrame(id=frame.id, result=None)
+            if resumable_state is not None:
+                resumable_state["terminal"] = terminal
+                resumable_state["finished_at"] = time.monotonic()
+            await self._send(terminal)
         except asyncio.CancelledError:
-            await self._send(
-                ErrorFrame(
-                    id=frame.id,
-                    code="CANCELLED",
-                    message="handler invocation was cancelled",
-                )
+            err_frame = ErrorFrame(
+                id=frame.id,
+                code="CANCELLED",
+                message="handler invocation was cancelled",
             )
+            if resumable_state is not None:
+                resumable_state["terminal"] = err_frame
+                resumable_state["finished_at"] = time.monotonic()
+            await self._send(err_frame)
             raise
         except Exception as exc:
             code = (
                 exc.code if isinstance(exc, AstrBotSDKError) else "PLUGIN_RUNTIME_ERROR"
             )
-            await self._send(ErrorFrame(id=frame.id, code=code, message=str(exc)))
+            err_frame = ErrorFrame(id=frame.id, code=code, message=str(exc))
+            if resumable_state is not None:
+                resumable_state["terminal"] = err_frame
+                resumable_state["finished_at"] = time.monotonic()
+            await self._send(err_frame)
         finally:
             self._invocations.pop(frame.id, None)
 
@@ -755,15 +1038,19 @@ class StdioPluginServer:
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
         self._capability_streams[stream_id] = queue
         try:
+            req_params: dict[str, Any] = {
+                "capability": capability_id,
+                "operation": operation,
+                "input": encode_value(payload),
+            }
+            parent_call_id = _AMBIENT_CALL_ID.get()
+            if parent_call_id is not None:
+                req_params["parent_call_id"] = parent_call_id
             await self._send(
                 RequestFrame(
                     id=stream_id,
                     method="capability.invoke",
-                    params={
-                        "capability": capability_id,
-                        "operation": operation,
-                        "input": encode_value(payload),
-                    },
+                    params=req_params,
                 ),
             )
             while True:
@@ -806,7 +1093,10 @@ class StdioPluginServer:
         self._invocations.clear()
         if self.loaded_plugin is not None:
             with contextlib.suppress(Exception):
-                await self.loaded_plugin.shutdown()
+                if self.legacy:
+                    await self.loaded_plugin.shutdown()
+                else:
+                    await self.loaded_plugin.shutdown(reason=self._stop_reason)
             self.loaded_plugin = None
 
 

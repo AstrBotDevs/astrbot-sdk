@@ -6,7 +6,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, TypeAlias, Union, get_args, get_origin, get_type_hints
 
 from ..assets import AssetRef
 from ..errors import InvalidRequest
@@ -42,8 +42,8 @@ from ..protocol_registry import (
 )
 from ..results import EventResult, MessageResult, Propagation
 
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+JSONValue: TypeAlias = (
+    None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 )
 
 

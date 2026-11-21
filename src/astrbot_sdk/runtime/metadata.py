@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import keyword
 import re
 from collections.abc import Mapping
@@ -11,6 +12,7 @@ from typing import Any
 
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from ..errors import (
     InvalidPluginMetadata,
@@ -19,8 +21,10 @@ from ..errors import (
 )
 
 METADATA_FILENAMES = ("metadata.yaml", "metadata.yml")
+MANIFEST_FILENAMES = ("plugin.json", "metadata.yaml", "metadata.yml")
 _REQUIRED_STRING_FIELDS = ("name", "desc", "version", "author")
 _CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$")
+_SEMVER_PLAIN_RE = re.compile(r"^[\^~]?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)$")
 
 
 class PluginAPIFamily(StrEnum):
@@ -29,12 +33,7 @@ class PluginAPIFamily(StrEnum):
 
 
 class PluginLanguage(StrEnum):
-    """Implementation language of the plugin runner.
-
-    Only Python runners exist today; the remaining values are declared in
-    the contract so metadata written for future SDKs parses cleanly, and
-    the launcher rejects them with a clear error at start time.
-    """
+    """Implementation language of the plugin runner."""
 
     PYTHON = "python"
     JAVA = "java"
@@ -50,6 +49,7 @@ class RuntimeMetadata:
     plugin_class: str
     sdk_version: str
     language: PluginLanguage = PluginLanguage.PYTHON
+    command: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,14 +95,30 @@ class PluginMetadata:
     support_platforms: tuple[str, ...] = ()
     pages: tuple[Mapping[str, Any], ...] = ()
     i18n: Mapping[str, Any] = field(default_factory=dict)
+    dependencies: Mapping[str, str] = field(default_factory=dict)
+    optional_dependencies: Mapping[str, str] = field(default_factory=dict)
+    explicit_id: str | None = None
+    target: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "i18n", MappingProxyType(dict(self.i18n)))
+        object.__setattr__(
+            self,
+            "dependencies",
+            MappingProxyType(dict(self.dependencies)),
+        )
+        object.__setattr__(
+            self,
+            "optional_dependencies",
+            MappingProxyType(dict(self.optional_dependencies)),
+        )
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
 
     @property
     def plugin_id(self) -> str:
+        if self.explicit_id:
+            return self.explicit_id
         name = self.name.lower().replace("/", "_")
         author = self.author.lower().replace("/", "_")
         return f"{author}/{name}"
@@ -173,21 +189,113 @@ def _optional_string(data: Mapping[str, Any], field_name: str) -> str | None:
 
 
 def _validate_specifier(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if normalized == "*":
+        return normalized
+    if normalized.startswith("^"):
+        try:
+            ver = Version(normalized[1:])
+        except InvalidVersion as exc:
+            raise InvalidPluginMetadata(
+                f"{field_name} must be a valid version range"
+            ) from exc
+        _ = ver
+        return normalized
+    if normalized.startswith("~") and not normalized.startswith("~="):
+        try:
+            Version(normalized[1:])
+        except InvalidVersion as exc:
+            raise InvalidPluginMetadata(
+                f"{field_name} must be a valid version range"
+            ) from exc
+        return normalized
     try:
-        SpecifierSet(value)
+        SpecifierSet(normalized)
     except InvalidSpecifier as exc:
         raise InvalidPluginMetadata(
-            f"{field_name} must be a valid PEP 440 version range"
+            f"{field_name} must be a valid PEP 440 or SemVer version range"
         ) from exc
-    return value
+    return normalized
 
 
-def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
+def _validate_command(
+    raw_command: Any,
+    plugin_root: Path | None = None,
+) -> tuple[str, ...]:
+    if not isinstance(raw_command, list | tuple) or not raw_command:
+        raise InvalidPluginMetadata("command must be a non-empty list of strings")
+    command: list[str] = []
+    for item in raw_command:
+        if not isinstance(item, str) or not item.strip():
+            raise InvalidPluginMetadata("command arguments must be non-empty strings")
+        command.append(item)
+    exe = Path(command[0])
+    if exe.is_absolute() or ".." in exe.parts:
+        raise InvalidPluginMetadata(
+            "command executable must be a relative path inside the plugin root"
+        )
+    if plugin_root is not None:
+        resolved_root = plugin_root.resolve()
+        candidate = (resolved_root / exe).resolve()
+        if candidate != resolved_root and resolved_root not in candidate.parents:
+            raise InvalidPluginMetadata(
+                "command executable escapes the plugin root directory"
+            )
+    return tuple(command)
+
+
+def _parse_dependencies(
+    data: Mapping[str, Any],
+    *,
+    self_id: str,
+    self_name: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    raw_req = data.get("dependencies", {})
+    raw_opt = data.get("optional_dependencies")
+    if raw_opt is None:
+        raw_opt = data.get("optionalDependencies", {})
+    if not isinstance(raw_req, Mapping) or not isinstance(raw_opt, Mapping):
+        raise InvalidPluginMetadata(
+            "dependencies and optional_dependencies must be mappings"
+        )
+
+    def _clean(raw_map: Mapping[str, Any], label: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for dep_id, spec in raw_map.items():
+            if not isinstance(dep_id, str) or not dep_id.strip():
+                raise InvalidPluginMetadata(f"{label} keys must be non-empty strings")
+            if not isinstance(spec, str) or not spec.strip():
+                raise InvalidPluginMetadata(
+                    f"{label}[{dep_id!r}] must be a version range string"
+                )
+            dep_clean = dep_id.strip()
+            if dep_clean in (self_id, self_name):
+                raise InvalidPluginMetadata(
+                    f"plugin cannot depend on itself: {dep_clean}"
+                )
+            out[dep_clean] = _validate_specifier(spec, f"{label}.{dep_clean}")
+        return out
+
+    required = _clean(raw_req, "dependencies")
+    optional = _clean(raw_opt, "optional_dependencies")
+    overlap = sorted(set(required) & set(optional))
+    if overlap:
+        raise InvalidPluginMetadata(
+            f"dependencies cannot be both required and optional: {', '.join(overlap)}"
+        )
+    return required, optional
+
+
+def _parse_runtime(
+    data: Mapping[str, Any],
+    *,
+    plugin_root: Path | None = None,
+) -> RuntimeMetadata:
     runtime = data.get("runtime")
     if not isinstance(runtime, Mapping):
         raise InvalidPluginMetadata("runtime must be a mapping")
 
-    unknown = set(runtime) - {"api", "entrypoint", "sdk_version", "language"}
+    unknown = set(runtime) - {"api", "entrypoint", "sdk_version", "language", "command"}
     if unknown:
         raise InvalidPluginMetadata(
             f"unknown runtime fields: {', '.join(sorted(map(str, unknown)))}"
@@ -204,23 +312,38 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
                 f"runtime.language must be one of: {supported}"
             ) from exc
 
-    entrypoint = _required_string(runtime, "entrypoint")
-    if entrypoint.count(":") != 1:
-        raise InvalidPluginMetadata(
-            "runtime.entrypoint must use '<module>:<PluginClass>'"
-        )
-    module, plugin_class = entrypoint.split(":", 1)
-    if not module or any(not part.isidentifier() for part in module.split(".")):
-        raise InvalidPluginMetadata("runtime.entrypoint contains an invalid module")
-    if not plugin_class or any(
-        not part.isidentifier() for part in plugin_class.split(".")
-    ):
-        raise InvalidPluginMetadata("runtime.entrypoint contains an invalid class name")
+    command: tuple[str, ...] = ()
+    if "command" in runtime and runtime["command"] is not None:
+        command = _validate_command(runtime["command"], plugin_root=plugin_root)
 
-    sdk_version = _validate_specifier(
-        _required_string(runtime, "sdk_version"),
-        "runtime.sdk_version",
-    )
+    if command and language != PluginLanguage.PYTHON and "entrypoint" not in runtime:
+        entrypoint = ""
+        module = ""
+        plugin_class = ""
+    else:
+        entrypoint = _required_string(runtime, "entrypoint")
+        if entrypoint.count(":") != 1:
+            raise InvalidPluginMetadata(
+                "runtime.entrypoint must use '<module>:<PluginClass>'"
+            )
+        module, plugin_class = entrypoint.split(":", 1)
+        if not module or any(not part.isidentifier() for part in module.split(".")):
+            raise InvalidPluginMetadata("runtime.entrypoint contains an invalid module")
+        if not plugin_class or any(
+            not part.isidentifier() for part in plugin_class.split(".")
+        ):
+            raise InvalidPluginMetadata(
+                "runtime.entrypoint contains an invalid class name"
+            )
+
+    raw_sdk_ver = runtime.get("sdk_version")
+    if command and language != PluginLanguage.PYTHON and raw_sdk_ver is None:
+        sdk_version = ">=0.1"
+    else:
+        sdk_version = _validate_specifier(
+            _required_string(runtime, "sdk_version"),
+            "runtime.sdk_version",
+        )
     return RuntimeMetadata(
         api=PluginAPIFamily.SDK,
         entrypoint=entrypoint,
@@ -228,6 +351,7 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
         plugin_class=plugin_class,
         sdk_version=sdk_version,
         language=language,
+        command=command,
     )
 
 
@@ -286,7 +410,11 @@ def _parse_capabilities(data: Mapping[str, Any]) -> CapabilityDeclarations:
     return CapabilityDeclarations(required=required, optional=optional)
 
 
-def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
+def parse_metadata(
+    data: Mapping[str, Any],
+    *,
+    plugin_root: Path | None = None,
+) -> PluginMetadata:
     family = detect_api_family(data)
     if family is PluginAPIFamily.LEGACY:
         raise LegacyPluginMetadata("metadata belongs to a legacy plugin")
@@ -297,7 +425,8 @@ def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
     for field_name in _REQUIRED_STRING_FIELDS:
         _required_string(normalized, field_name)
     name = _required_string(normalized, "name")
-    if not name.isidentifier() or keyword.iskeyword(name):
+    runtime = _parse_runtime(normalized, plugin_root=plugin_root)
+    if not runtime.command and (not name.isidentifier() or keyword.iskeyword(name)):
         raise InvalidPluginMetadata(
             "metadata field 'name' must be an importable Python identifier"
         )
@@ -325,6 +454,14 @@ def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
     if not isinstance(i18n, Mapping):
         raise InvalidPluginMetadata("i18n must be a mapping")
 
+    author = _required_string(normalized, "author")
+    self_id = f"{author.lower().replace('/', '_')}/{name.lower().replace('/', '_')}"
+    dependencies, optional_dependencies = _parse_dependencies(
+        normalized,
+        self_id=self_id,
+        self_name=name,
+    )
+
     known_fields = {
         "schema_version",
         "name",
@@ -341,6 +478,10 @@ def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
         "i18n",
         "runtime",
         "capabilities",
+        "dependencies",
+        "optional_dependencies",
+        "optionalDependencies",
+        "target",
     }
     extra = {key: value for key, value in normalized.items() if key not in known_fields}
 
@@ -350,18 +491,87 @@ def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
         display_name=_optional_string(normalized, "display_name"),
         desc=_required_string(normalized, "desc"),
         short_desc=_optional_string(normalized, "short_desc"),
-        author=_required_string(normalized, "author"),
+        author=author,
         version=_required_string(normalized, "version"),
         repo=_optional_string(normalized, "repo"),
         astrbot_version=astrbot_version,
         support_platforms=tuple(support_platforms),
         pages=immutable_pages,
         i18n=i18n,
-        runtime=_parse_runtime(normalized),
+        runtime=runtime,
         capabilities=_parse_capabilities(normalized),
+        dependencies=dependencies,
+        optional_dependencies=optional_dependencies,
+        target=_optional_string(normalized, "target"),
         extra=extra,
     )
 
 
+def parse_plugin_json(
+    data: Mapping[str, Any],
+    *,
+    plugin_root: Path | None = None,
+) -> PluginMetadata:
+    """Parse a native `plugin.json` manifest (schemaVersion 1)."""
+    schema_version = data.get("schemaVersion")
+    if type(schema_version) is not int or schema_version != 1:
+        raise UnsupportedMetadataVersion(
+            f"unsupported plugin.json schemaVersion: {schema_version!r}"
+        )
+    plugin_id = _required_string(data, "id")
+    name = _required_string(data, "name")
+    author = _required_string(data, "author")
+    version = _required_string(data, "version")
+    try:
+        Version(version)
+    except InvalidVersion as exc:
+        raise InvalidPluginMetadata(f"invalid SemVer version: {version!r}") from exc
+    desc = str(data.get("description") or "")
+    command = _validate_command(data.get("command"), plugin_root=plugin_root)
+    host_version = _optional_string(data, "hostVersion")
+    if host_version:
+        _validate_specifier(host_version, "hostVersion")
+    dependencies, optional_dependencies = _parse_dependencies(
+        data,
+        self_id=plugin_id,
+        self_name=name,
+    )
+    return PluginMetadata(
+        schema_version=1,
+        name=name,
+        desc=desc,
+        version=version,
+        author=author,
+        runtime=RuntimeMetadata(
+            api=PluginAPIFamily.SDK,
+            entrypoint="",
+            module="",
+            plugin_class="",
+            sdk_version=">=0.1",
+            language=PluginLanguage.RUST,
+            command=command,
+        ),
+        capabilities=_parse_capabilities(data),
+        astrbot_version=host_version,
+        dependencies=dependencies,
+        optional_dependencies=optional_dependencies,
+        explicit_id=plugin_id,
+        target=_optional_string(data, "target"),
+    )
+
+
 def load_metadata(plugin_root: str | Path) -> PluginMetadata:
-    return parse_metadata(read_metadata(plugin_root))
+    root = Path(plugin_root)
+    plugin_json = root / "plugin.json"
+    if plugin_json.is_file():
+        try:
+            data = json.loads(plugin_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InvalidPluginMetadata(f"cannot read plugin.json: {exc}") from exc
+        if not isinstance(data, Mapping):
+            raise InvalidPluginMetadata("plugin.json must contain a JSON object")
+        return parse_plugin_json(data, plugin_root=root)
+    return parse_metadata(read_metadata(root), plugin_root=root)
+
+
+load_manifest = load_metadata

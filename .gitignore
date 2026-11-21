@@ -1,8 +1,14 @@
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .venv/
 __pycache__/
 dist/
+target/
+Cargo.lock
+src/astrbot_sdk/_native*.so
+src/astrbot_sdk/_native*.pyd
+examples/rust_echo/bin/
 .DS_Store
 
 # runtime artifacts from local plugin runs

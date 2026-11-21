@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .stdio_server import serve_stdio_plugin
+from .uds_runner import serve_uds_plugin
 from .ws_runner import RUNNER_TOKEN_ENV, serve_ws_plugin
 
 # Legacy plugins may spawn multiprocessing children (spawn start method). The
@@ -37,6 +38,11 @@ def main() -> None:
         metavar="URL",
         help="Dial out to the Host WebSocket listener (ws:// or wss://)",
     )
+    transport.add_argument(
+        "--uds",
+        metavar="CREDENTIAL_FILE",
+        help="Attach to the Host Unix domain socket via an external credential file",
+    )
     parser.add_argument("--plugin-root", type=Path, required=True)
     parser.add_argument(
         "--legacy",
@@ -46,6 +52,15 @@ def main() -> None:
     args = parser.parse_args()
     if args.stdio:
         asyncio.run(serve_stdio_plugin(args.plugin_root, legacy=args.legacy))
+        return
+    if args.uds:
+        asyncio.run(
+            serve_uds_plugin(
+                args.plugin_root,
+                Path(args.uds),
+                legacy=args.legacy,
+            )
+        )
         return
     asyncio.run(
         serve_ws_plugin(

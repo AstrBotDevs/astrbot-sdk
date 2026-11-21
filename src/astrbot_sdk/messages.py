@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import overload
+from typing import TypeAlias, overload
 
 from .message_components import MessageSegment, Plain
 
@@ -44,7 +44,7 @@ class MessageChain(Sequence[MessageSegment]):
         )
 
 
-type MessageLike = str | MessageSegment | Sequence[MessageSegment] | MessageChain
+MessageLike: TypeAlias = str | MessageSegment | Sequence[MessageSegment] | MessageChain
 
 
 def to_message_chain(content: MessageLike) -> MessageChain:

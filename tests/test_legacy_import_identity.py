@@ -124,19 +124,24 @@ def test_spawn_child_bootstrap_installs_legacy_shims(tmp_path: Path) -> None:
 def test_shims_are_not_installed_without_runner_flag(tmp_path: Path) -> None:
     """The legacy shims must not leak into unrelated interpreters."""
     code = (
-        "import astrbot_sdk.runtime.__main__; "
-        "import astrbot.api; "
-        "print('shim' if not getattr(astrbot.api, '__file__', None) else 'real')"
+        "import astrbot_sdk.runtime.__main__\n"
+        "try:\n"
+        "    import astrbot.api\n"
+        "    print('shim' if not getattr(astrbot.api, '__file__', None) else 'real')\n"
+        "except ModuleNotFoundError:\n"
+        "    print('absent')\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         check=False,
+        # Away from the repo root so `astrbot/` is not importable from cwd.
         cwd=tmp_path,
     )
     assert result.returncode == 0, result.stderr
-    assert "real" in result.stdout
+    assert "shim" not in result.stdout
+    assert "absent" in result.stdout or "real" in result.stdout
 
 
 @pytest.fixture()

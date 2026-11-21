@@ -18,6 +18,11 @@ from .transport import (
     StreamTransport,
     WebSocketTransport,
 )
+from .uds_runner import (
+    ExternalCredential,
+    load_external_credential,
+    serve_uds_plugin,
+)
 from .ws_client import WSPluginClient
 from .ws_listener import WSPluginListener
 from .ws_runner import RUNNER_TOKEN_ENV, serve_ws_plugin
@@ -26,6 +31,7 @@ __all__ = [
     "RUNNER_TOKEN_ENV",
     "CapabilityDeclarations",
     "CapabilityRequirement",
+    "ExternalCredential",
     "FrameTransport",
     "HandlerDescriptor",
     "LoadedPlugin",
@@ -41,10 +47,12 @@ __all__ = [
     "WSPluginListener",
     "WebSocketTransport",
     "detect_api_family",
+    "load_external_credential",
     "load_metadata",
     "load_plugin",
     "parse_metadata",
     "read_metadata",
     "serve_stdio_plugin",
+    "serve_uds_plugin",
     "serve_ws_plugin",
 ]

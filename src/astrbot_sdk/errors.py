@@ -9,6 +9,10 @@ class InvalidRequest(AstrBotSDKError):
     code = "INVALID_REQUEST"
 
 
+class InvalidConfig(AstrBotSDKError):
+    code = "INVALID_CONFIG"
+
+
 class InvalidPluginDefinition(AstrBotSDKError):
     code = "INVALID_PLUGIN_DEFINITION"
 
@@ -47,6 +51,18 @@ class InvalidHandlerResult(AstrBotSDKError):
 
 class CapabilityDenied(AstrBotSDKError):
     code = "CAPABILITY_DENIED"
+
+
+class CallScopeRetired(AstrBotSDKError):
+    code = "CALL_SCOPE_RETIRED"
+
+
+class ServiceUnavailable(AstrBotSDKError):
+    code = "SERVICE_UNAVAILABLE"
+
+
+class DependencyBlocked(AstrBotSDKError):
+    code = "DEPENDENCY_BLOCKED"
 
 
 class NotFound(AstrBotSDKError):
@@ -93,7 +109,11 @@ class RemoteHostError(RemoteError):
 
 _REMOTE_ERROR_TYPES: dict[str, type[AstrBotSDKError]] = {
     "INVALID_REQUEST": InvalidRequest,
+    "INVALID_CONFIG": InvalidConfig,
     "CAPABILITY_DENIED": CapabilityDenied,
+    "CALL_SCOPE_RETIRED": CallScopeRetired,
+    "SERVICE_UNAVAILABLE": ServiceUnavailable,
+    "DEPENDENCY_BLOCKED": DependencyBlocked,
     "NOT_FOUND": NotFound,
     "CONFLICT": Conflict,
     "RATE_LIMITED": RateLimited,
