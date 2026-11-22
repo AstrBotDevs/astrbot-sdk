@@ -63,6 +63,8 @@ struct RawPluginJson {
     author: String,
     command: Vec<String>,
     #[serde(default)]
+    isolation: Option<String>,
+    #[serde(default)]
     host_version: Option<String>,
     #[serde(default)]
     target: Option<String>,
@@ -80,6 +82,8 @@ struct RawRuntimeYaml {
     entrypoint: Option<String>,
     sdk_version: Option<String>,
     language: Option<String>,
+    #[serde(default)]
+    isolation: Option<String>,
     #[serde(default)]
     command: Vec<String>,
 }
@@ -254,6 +258,16 @@ pub fn load_manifest(plugin_root: impl AsRef<Path>) -> Result<PluginManifest, Wi
             ));
         }
         validate_command_argv(root, &raw.command)?;
+        if let Some(isolation) = raw.isolation.as_deref() {
+            if !matches!(isolation, "shared" | "dedicated") {
+                return Err(WireError::new(
+                    "INVALID_PLUGIN_METADATA",
+                    format!(
+                        "plugin.json isolation must be 'shared' or 'dedicated', got {isolation:?}"
+                    ),
+                ));
+            }
+        }
         validate_capabilities(&raw.capabilities)?;
         validate_dependencies(
             &raw.id,
@@ -323,6 +337,14 @@ pub fn load_manifest(plugin_root: impl AsRef<Path>) -> Result<PluginManifest, Wi
         let language = runtime.language.unwrap_or_else(|| "python".to_owned());
         if !runtime.command.is_empty() {
             validate_command_argv(root, &runtime.command)?;
+        }
+        if let Some(isolation) = runtime.isolation.as_deref() {
+            if !matches!(isolation, "shared" | "dedicated") {
+                return Err(WireError::new(
+                    "INVALID_PLUGIN_METADATA",
+                    format!("runtime.isolation must be 'shared' or 'dedicated', got {isolation:?}"),
+                ));
+            }
         }
         validate_capabilities(&raw.capabilities)?;
         let id = format!(
