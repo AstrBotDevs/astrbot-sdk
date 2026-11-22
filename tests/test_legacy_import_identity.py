@@ -124,19 +124,24 @@ def test_spawn_child_bootstrap_installs_legacy_shims(tmp_path: Path) -> None:
 def test_shims_are_not_installed_without_runner_flag(tmp_path: Path) -> None:
     """The legacy shims must not leak into unrelated interpreters."""
     code = (
-        "import astrbot_sdk.runtime.__main__; "
-        "import astrbot.api; "
-        "print('shim' if not getattr(astrbot.api, '__file__', None) else 'real')"
+        "import astrbot_sdk.runtime.__main__\n"
+        "try:\n"
+        "    import astrbot.api\n"
+        "    print('shim' if not getattr(astrbot.api, '__file__', None) else 'real')\n"
+        "except ModuleNotFoundError:\n"
+        "    print('absent')\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         check=False,
+        # Away from the repo root so `astrbot/` is not importable from cwd.
         cwd=tmp_path,
     )
     assert result.returncode == 0, result.stderr
-    assert "real" in result.stdout
+    assert "shim" not in result.stdout
+    assert "absent" in result.stdout or "real" in result.stdout
 
 
 @pytest.fixture()
@@ -204,3 +209,25 @@ def test_spawn_child_reanchors_virtual_roots(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "anchored" in result.stdout
+
+
+def test_external_store_ignores_mismatched_astrbot_data_path(
+    remote_env,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom store outside ASTRBOT_DATA_PATH falls back to virtual root anchoring."""
+    _, ctx = remote_env
+    data_dir = tmp_path / "astrbot_root" / "data"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("ASTRBOT_DATA_PATH", str(data_dir))
+    external_plugin = tmp_path / "external_store" / PLUGIN_NAME
+    _write_plugin(external_plugin, value=9)
+
+    load_legacy_plugin(external_plugin, ctx=ctx)
+
+    package = f"data.plugins.{PLUGIN_NAME}"
+    assert sys.modules[f"{package}.main"].VALUE == 9
+    assert str(external_plugin.parent) in (
+        os.environ["ASTRBOT_SDK_VIRTUAL_PLUGIN_PARENTS"].split(os.pathsep)
+    )

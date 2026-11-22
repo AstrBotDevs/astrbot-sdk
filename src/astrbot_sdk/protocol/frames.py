@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeAlias
 
 from ..errors import InvalidRequest
 
@@ -66,7 +66,7 @@ class ErrorFrame:
     message: str
 
 
-type ProtocolFrame = (
+ProtocolFrame: TypeAlias = (
     RequestFrame | ResponseFrame | YieldFrame | AckFrame | CancelFrame | ErrorFrame
 )
 

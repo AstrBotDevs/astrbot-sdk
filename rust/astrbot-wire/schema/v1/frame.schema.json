@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AstrBot Protocol v1 Frame",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "id", "method"],
+      "properties": {
+        "type": { "const": "request" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "method": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "response" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "result": {}
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "id", "sequence"],
+      "properties": {
+        "type": { "const": "yield" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "result": {}
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "id", "sequence"],
+      "properties": {
+        "type": { "const": "ack" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sequence": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "cancel" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "id", "code", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "data": {}
+      },
+      "additionalProperties": false
+    }
+  ]
+}

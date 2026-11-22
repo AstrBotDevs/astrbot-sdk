@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "astrbot.rust_echo",
+  "name": "rust_echo",
+  "description": "Standalone Rust Worker echo plugin example",
+  "version": "0.1.0",
+  "author": "AstrBot",
+  "command": ["bin/rust_echo"],
+  "capabilities": {
+    "required": [],
+    "optional": []
+  }
+}

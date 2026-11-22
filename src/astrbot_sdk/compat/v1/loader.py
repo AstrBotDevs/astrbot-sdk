@@ -10,6 +10,7 @@ import sys
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -28,6 +29,7 @@ from .components import MessageEventResult
 from .event import (
     _FILTERS_ATTR,
     AstrMessageEvent,
+    ButtonActionFilter,
     CommandFilter,
     CustomFilter,
     EventMessageTypeFilter,
@@ -36,6 +38,7 @@ from .event import (
     PermissionTypeFilter,
     PlatformAdapterTypeFilter,
     RegexFilter,
+    UIActionFilter,
     _CommandGroup,
     translate_compat_result,
 )
@@ -126,8 +129,9 @@ class CompatLoadedPlugin:
         *args: Any,
         **kwargs: Any,
     ) -> AsyncIterator[EventResult | None]:
-        registration = self.get_handler(handler_id)
-        outcome = registration.handler(*args, **kwargs)
+        dyn = self.instance.context._dynamic_commands.get(handler_id)
+        target = dyn if dyn is not None else self.get_handler(handler_id).handler
+        outcome = target(*args, **kwargs)
         if inspect.isasyncgen(outcome):
             try:
                 async for item in outcome:
@@ -181,7 +185,7 @@ class CompatLoadedPlugin:
             from ...errors import InvalidRequest
 
             raise InvalidRequest(f"unknown cron handler: {handler_id}")
-        args = dict(payload.get("args") or ())
+        args = list(payload.get("args") or ())
         kwargs = dict(payload.get("kwargs") or {})
         result = handler(*args, **kwargs)
         if inspect.isawaitable(result):
@@ -308,15 +312,22 @@ def _compile_filters(
     Returns the spec plus any custom Python filters, which are evaluated
     Runner-side at invoke time.
     """
+    resolved_priority = next(
+        (int(p) for s in filters if (p := getattr(s, "priority", None)) is not None),
+        0,
+    )
     for spec in filters:
         if isinstance(spec, HookMarker):
             stage = spec.stage
             if stage.startswith("lifecycle."):
-                return HandlerSpec(kind=HandlerKind.LIFECYCLE_STARTUP), []
+                return HandlerSpec(
+                    kind=HandlerKind.LIFECYCLE_STARTUP,
+                    priority=resolved_priority,
+                ), []
             kind = HOOK_STAGE_KINDS.get(stage)
             if kind is None:
                 raise InvalidPluginDefinition(f"unsupported legacy hook stage: {stage}")
-            return HandlerSpec(kind=kind), []
+            return HandlerSpec(kind=kind, priority=resolved_priority), []
         if isinstance(spec, LLMToolMarker):
             return HandlerSpec(kind=HandlerKind.TOOL, tool_name=spec.name), []
 
@@ -327,14 +338,25 @@ def _compile_filters(
     regex_flags = 0
     message_types: list[MessageType] = []
     platforms: list[str] = []
+    allow_all_platforms = False
     roles: list[SenderRole] = []
     custom_filters = []
+    button_action = False
+    button_action_id: str | None = None
+    ui_action = False
+    ui_action_id: str | None = None
 
     for spec in filters:
         if isinstance(spec, CommandFilter):
             path = spec.command_name
             group = spec.is_group
             aliases = tuple(sorted(spec.alias))
+        elif isinstance(spec, ButtonActionFilter):
+            button_action = True
+            button_action_id = spec.action_id
+        elif isinstance(spec, UIActionFilter):
+            ui_action = True
+            ui_action_id = spec.action_id
         elif isinstance(spec, RegexFilter):
             raw_regex = spec.regex
             if isinstance(raw_regex, re.Pattern):
@@ -373,9 +395,12 @@ def _compile_filters(
             if isinstance(platform_type, str):
                 platforms.append(platform_type)
             elif isinstance(platform_type, PlatformAdapterType):
-                for member, name in PLATFORM_ADAPTER_NAMES.items():
-                    if platform_type & member:
-                        platforms.append(name)
+                if platform_type & PlatformAdapterType.ALL:
+                    allow_all_platforms = True
+                else:
+                    for member, name in PLATFORM_ADAPTER_NAMES.items():
+                        if platform_type & member:
+                            platforms.append(name)
             else:
                 platforms.append(str(platform_type))
         elif isinstance(spec, PermissionTypeFilter):
@@ -386,15 +411,27 @@ def _compile_filters(
         elif isinstance(spec, CustomFilter):
             custom_filters.append(spec.custom_filter)
 
+    effective_platforms: tuple[str, ...] = (
+        () if allow_all_platforms else tuple(platforms)
+    )
     if path is not None:
+        sub_command = bool(
+            filters
+            and isinstance(filters[0], CommandFilter)
+            and filters[0].is_sub_command
+        )
+        group_custom_filters = bool(group and custom_filters)
         return (
             HandlerSpec(
                 kind=HandlerKind.COMMAND,
+                priority=resolved_priority,
                 path=path,
                 group=group,
+                group_custom_filters=group_custom_filters,
+                sub_command=sub_command,
                 aliases=aliases,
                 message_types=tuple(message_types),
-                platforms=tuple(platforms),
+                platforms=effective_platforms,
                 roles=tuple(roles),
             ),
             custom_filters,
@@ -402,11 +439,16 @@ def _compile_filters(
     return (
         HandlerSpec(
             kind=HandlerKind.MESSAGE,
+            priority=resolved_priority,
             message_types=tuple(message_types),
-            platforms=tuple(platforms),
+            platforms=effective_platforms,
             roles=tuple(roles),
             regex=regex,
             regex_flags=regex_flags,
+            button_action=button_action,
+            button_action_id=button_action_id,
+            ui_action=ui_action,
+            ui_action_id=ui_action_id,
         ),
         custom_filters,
     )
@@ -507,6 +549,47 @@ def _legacy_tool_params(method: Any) -> list[dict[str, Any]]:
     return params
 
 
+def _legacy_command_params(method: Any) -> list[dict[str, Any]]:
+    """Derive command parameter metadata from a legacy command signature."""
+    parameters = list(inspect.signature(method).parameters.values())
+    if parameters and parameters[0].name == "self":
+        parameters = parameters[1:]
+    if parameters:
+        # First parameter after self is always the event facade.
+        parameters = parameters[1:]
+    schema: list[dict[str, Any]] = []
+    for param in parameters:
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
+        ann = param.annotation
+        ann_name = (
+            ann.__name__ if isinstance(ann, type) else str(ann).rsplit(".", 1)[-1]
+        )
+        has_default = param.default is not inspect.Parameter.empty
+        if ann is GreedyStr or ann_name == "GreedyStr":
+            param_type_name = "GreedyStr"
+        elif ann in (str, int, float, bool) and isinstance(ann, type):
+            param_type_name = ann.__name__
+        elif ann_name in {"str", "int", "float", "bool"}:
+            param_type_name = ann_name
+        elif has_default and type(param.default) in (str, int, float, bool):
+            param_type_name = type(param.default).__name__
+        else:
+            param_type_name = "str"
+        schema.append(
+            {
+                "name": param.name,
+                "type": param_type_name,
+                "required": not has_default,
+                "default": param.default if has_default else None,
+            }
+        )
+    return schema
+
+
 def _wrap_tool(
     plugin: Star,
     method: Any,
@@ -528,7 +611,12 @@ def _wrap_tool(
                 if message is not None and call.umo is not None:
                     await sdk_ctx.messages.send(call.umo, message)
             return None
-        return await outcome
+        returned = await outcome
+        from .chatui import ViewResult as CompatViewResult
+
+        if isinstance(returned, CompatViewResult):
+            return returned.to_sdk_result()
+        return returned
 
     wrapper.__name__ = method.__name__
     return wrapper
@@ -623,7 +711,7 @@ def _parse_legacy_args(
 
 
 async def _execute_llm_request(
-    plugin: Star,
+    plugin: Any,
     facade: AstrMessageEvent,
     request: Any,
 ) -> Any:
@@ -634,7 +722,8 @@ async def _execute_llm_request(
     """
     from .provider import Provider
 
-    provider = Provider(plugin.context._inner, umo=facade._event.umo)
+    compat_ctx = plugin.context if hasattr(plugin, "context") else plugin
+    provider = Provider(compat_ctx._inner, umo=facade._event.umo)
     response = await provider.text_chat(
         prompt=request.prompt,
         image_urls=request.image_urls,
@@ -646,7 +735,7 @@ async def _execute_llm_request(
     if request.conversation is not None:
         from ...conversations import Message
 
-        await plugin.context._inner.conversations.append(
+        await compat_ctx._inner.conversations.append(
             facade._event.umo,
             request.conversation.cid,
             (
@@ -658,15 +747,17 @@ async def _execute_llm_request(
 
 
 def _wrap_handler(
-    plugin: Star,
+    plugin: Any,
     method: Any,
     spec: HandlerSpec | None = None,
     custom_filters: list | None = None,
 ) -> Any:
     """Wrap one legacy handler into the new invoke contract."""
+    compat_ctx = plugin.context if hasattr(plugin, "context") else plugin
 
     async def wrapper(event, **kwargs):
-        facade = build_legacy_event(event, plugin.context)
+        bare_group = bool(kwargs.pop("bare_group", False))
+        facade = build_legacy_event(event, compat_ctx)
         try:
             for custom_filter in custom_filters or []:
                 # The global config does not cross the isolation boundary; custom
@@ -679,6 +770,11 @@ def _wrap_handler(
                     accepted = await accepted
                 if not accepted:
                     return
+            if bare_group and spec is not None and spec.group:
+                from ...results import GroupUsage, Propagation
+
+                yield GroupUsage(propagation=Propagation.STOP)
+                return
             if spec is not None and spec.kind is HandlerKind.COMMAND:
                 kwargs = {
                     **_parse_legacy_args(method, spec, facade.message_str),
@@ -732,9 +828,9 @@ def _resolve_astrbot_root(plugin_root: Path) -> Path | None:
     """
     data_path = os.environ.get("ASTRBOT_DATA_PATH")
     if data_path:
-        candidate = Path(data_path).resolve().parent
-        if (candidate / "data").is_dir():
-            return candidate
+        resolved_data = Path(data_path).resolve()
+        if (resolved_data / "plugins" / plugin_root.name) == plugin_root:
+            return resolved_data.parent
     if (
         plugin_root.parent.name == "plugins"
         and plugin_root.parent.parent.name == "data"
@@ -798,7 +894,14 @@ def load_legacy_plugin(
         from ...runtime.loader import install_virtual_plugin_root
 
         install_virtual_plugin_root(root)
-    module_name = f"{package}.main"
+    if (root / "main.py").is_file():
+        module_name = f"{package}.main"
+    elif (root / f"{root.name}.py").is_file():
+        module_name = f"{package}.{root.name}"
+    elif (root / "__init__.py").is_file():
+        module_name = package
+    else:
+        module_name = f"{package}.main"
 
     # Bind the legacy facades before any plugin code runs: plugins may touch
     # StarTools/sp/html_renderer at module import time (top-level statements
@@ -816,8 +919,33 @@ def load_legacy_plugin(
 
     HtmlRendererFacade.initialize(ctx)
     from .api import _SharedPreferences
+    from .host_snapshot import FileTokenServiceFacade
 
     _SharedPreferences.initialize(ctx)
+    FileTokenServiceFacade.initialize(ctx)
+
+    raw_handlers = (
+        (snapshot or {}).get("handlers") if isinstance(snapshot, Mapping) else None
+    )
+    if isinstance(raw_handlers, list):
+        star_handler_mod = sys.modules.get("astrbot.core.star.star_handler")
+        if star_handler_mod is not None:
+            entries = [
+                SimpleNamespace(
+                    **{
+                        **dict(entry),
+                        "event_type": getattr(
+                            star_handler_mod.EventType,
+                            str(entry.get("event_type") or ""),
+                            entry.get("event_type"),
+                        ),
+                    }
+                )
+                for entry in raw_handlers
+                if isinstance(entry, Mapping)
+            ]
+            star_handler_mod.star_handlers_registry.clear()
+            star_handler_mod.star_handlers_registry.extend(entries)
 
     # Legacy plugins may bare-import sibling modules (import helpers); the
     # in-process loader keeps plugin dirs on sys.path, so mirror that.
@@ -905,6 +1033,8 @@ def load_legacy_plugin(
             handler.__tool_params__ = _legacy_tool_params(method)
         elif spec.kind in (HandlerKind.COMMAND, HandlerKind.MESSAGE):
             handler = _wrap_handler(instance, method, spec, custom_filters)
+            if spec.kind is HandlerKind.COMMAND:
+                handler.__command_params__ = _legacy_command_params(method)
         else:
             # Hook and lifecycle handlers keep their legacy signature; the
             # invoke paths adapt arguments per stage.
@@ -913,8 +1043,11 @@ def load_legacy_plugin(
             kind=spec.kind,
             id=method_name,
             description=inspect.getdoc(method),
+            priority=spec.priority,
             path=spec.path,
             group=spec.group,
+            group_custom_filters=spec.group_custom_filters,
+            sub_command=spec.sub_command,
             aliases=spec.aliases,
             tool_name=spec.tool_name,
             message_types=spec.message_types,
@@ -922,6 +1055,10 @@ def load_legacy_plugin(
             roles=spec.roles,
             regex=spec.regex,
             regex_flags=spec.regex_flags,
+            button_action=spec.button_action,
+            button_action_id=spec.button_action_id,
+            ui_action=spec.ui_action,
+            ui_action_id=spec.ui_action_id,
         )
         registrations.append(
             HandlerRegistration(
@@ -931,6 +1068,40 @@ def load_legacy_plugin(
                 handler=handler,
             ),
         )
+
+    star_handler_mod = sys.modules.get("astrbot.core.star.star_handler")
+    if star_handler_mod is not None and isinstance(
+        getattr(star_handler_mod, "star_handlers_registry", None), list
+    ):
+        existing_names = {
+            getattr(item, "handler_full_name", "")
+            for item in star_handler_mod.star_handlers_registry
+        }
+        event_type_cls = star_handler_mod.EventType
+        for reg in registrations:
+            full_name = f"{module_name}_{reg.method_name}"
+            if full_name in existing_names:
+                continue
+            ev_type = (
+                event_type_cls.AdapterMessageEvent
+                if reg.spec.kind in (HandlerKind.COMMAND, HandlerKind.MESSAGE)
+                else reg.spec.kind.value
+            )
+            star_handler_mod.star_handlers_registry.append(
+                SimpleNamespace(
+                    event_type=ev_type,
+                    handler_full_name=full_name,
+                    handler_name=reg.method_name,
+                    handler_module_path=module_name,
+                    desc=reg.spec.description or "",
+                    enabled=True,
+                    priority=reg.spec.priority,
+                    plugin_name=metadata.name,
+                    plugin_activated=True,
+                    plugin_reserved=False,
+                    filters=[],
+                )
+            )
 
     return CompatLoadedPlugin(
         metadata=metadata,

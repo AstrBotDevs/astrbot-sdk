@@ -83,7 +83,7 @@ class _BlockedModule(ModuleType):
 
 
 class _SharedPreferences:
-    """Legacy sp facade backed by plugin-scoped KV storage."""
+    """Legacy sp facade backed by Host sp.store with KV fallback."""
 
     _ctx: Any = None
 
@@ -92,19 +92,122 @@ class _SharedPreferences:
         """Bind the plugin context (called once by the compat loader)."""
         cls._ctx = ctx
 
-    def _storage(self) -> Any:
-        if _SharedPreferences._ctx is None:
+    @staticmethod
+    def _require_ctx() -> Any:
+        ctx = _SharedPreferences._ctx
+        if ctx is None:
             raise ValueError("sp not initialized")
-        return _SharedPreferences._ctx.storage
+        return ctx
+
+    @staticmethod
+    def _uses_sp_store(ctx: Any) -> bool:
+        caps = getattr(ctx, "capabilities", None)
+        return (
+            caps is not None
+            and caps.has("sp.store")
+            and hasattr(ctx, "_invoke_capability")
+        )
+
+    async def get_async(
+        self,
+        scope: str,
+        scope_id: str,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """Read one scoped preference from Host sp.store or storage."""
+        ctx = self._require_ctx()
+        if self._uses_sp_store(ctx):
+            result = await ctx._invoke_capability(
+                "sp.store",
+                "get",
+                {
+                    "scope": scope,
+                    "scope_id": scope_id,
+                    "key": key,
+                    "default": default,
+                },
+            )
+            return result.get("value", default) if isinstance(result, dict) else default
+        return await ctx.storage.get(f"sp:{scope}:{scope_id}:{key}", default)
+
+    async def range_get_async(
+        self,
+        scope: str,
+        scope_id: str | None = None,
+        key: str | None = None,
+    ) -> list[_ShellRecord]:
+        """List preference entries matching optional scope_id/key filters."""
+        ctx = self._require_ctx()
+        if self._uses_sp_store(ctx):
+            result = await ctx._invoke_capability(
+                "sp.store",
+                "range_get",
+                {"scope": scope, "scope_id": scope_id, "key": key},
+            )
+            entries = result.get("entries", []) if isinstance(result, dict) else []
+            return [
+                _ShellRecord(
+                    scope=entry.get("scope"),
+                    scope_id=entry.get("scope_id"),
+                    key=entry.get("key"),
+                    value={"val": entry.get("value")},
+                )
+                for entry in entries
+            ]
+        return []
+
+    async def put_async(
+        self,
+        scope: str,
+        scope_id: str,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Persist one scoped preference."""
+        ctx = self._require_ctx()
+        if self._uses_sp_store(ctx):
+            await ctx._invoke_capability(
+                "sp.store",
+                "put",
+                {"scope": scope, "scope_id": scope_id, "key": key, "value": value},
+            )
+            return
+        await ctx.storage.set(f"sp:{scope}:{scope_id}:{key}", value)
+
+    async def remove_async(self, scope: str, scope_id: str, key: str) -> None:
+        """Remove one scoped preference."""
+        ctx = self._require_ctx()
+        if self._uses_sp_store(ctx):
+            await ctx._invoke_capability(
+                "sp.store",
+                "remove",
+                {"scope": scope, "scope_id": scope_id, "key": key},
+            )
+            return
+        await ctx.storage.delete(f"sp:{scope}:{scope_id}:{key}")
+
+    async def clear_async(self, scope: str, scope_id: str) -> None:
+        """Clear every preference under one scope_id."""
+        ctx = self._require_ctx()
+        if self._uses_sp_store(ctx):
+            await ctx._invoke_capability(
+                "sp.store",
+                "clear",
+                {"scope": scope, "scope_id": scope_id},
+            )
 
     async def get(self, scope: str, key: str, default: Any = None) -> Any:
-        return await self._storage().get(f"sp:{scope}:{key}", default)
+        """Read one scope/key preference."""
+        return await self.get_async(scope, scope, key, default)
 
     async def put(self, scope: str, key: str, value: Any) -> None:
-        await self._storage().set(f"sp:{scope}:{key}", value)
+        """Write one scope/key preference."""
+        await self.put_async(scope, scope, key, value)
 
     async def remove(self, scope: str, key: str) -> None:
-        await self._storage().delete(f"sp:{scope}:{key}")
+        """Delete one scope/key preference."""
+        await self.remove_async(scope, scope, key)
 
     async def session_get(
         self,
@@ -113,10 +216,30 @@ class _SharedPreferences:
         default: Any = None,
         **_: Any,
     ) -> Any:
-        return await self._storage().get(f"sp:session:{umo}:{key}", default)
+        """Read one session-scoped preference (`scope='umo'`)."""
+        return await self.get_async("umo", str(umo), key, default)
 
     async def session_put(self, umo: str, key: str, value: Any) -> None:
-        await self._storage().set(f"sp:session:{umo}:{key}", value)
+        """Persist one session-scoped preference (`scope='umo'`)."""
+        await self.put_async("umo", str(umo), key, value)
+
+    async def session_remove(self, umo: str, key: str) -> None:
+        """Remove one session-scoped preference (`scope='umo'`)."""
+        await self.remove_async("umo", str(umo), key)
+
+    async def global_get(self, key: str | None = None, default: Any = None) -> Any:
+        """Read one global preference or list global entries when key is None."""
+        if key is None:
+            return await self.range_get_async("global", "global", None)
+        return await self.get_async("global", "global", key, default)
+
+    async def global_put(self, key: str, value: Any) -> None:
+        """Persist one global preference (`scope='global'`)."""
+        await self.put_async("global", "global", key, value)
+
+    async def global_remove(self, key: str) -> None:
+        """Remove one global preference (`scope='global'`)."""
+        await self.remove_async("global", "global", key)
 
 
 def _utils_io_mod() -> ModuleType:
@@ -187,8 +310,11 @@ def install(host_version: str | None = None) -> None:
         return
 
     from . import (
+        agents,
+        chatui,
         components,
         event,
+        host_snapshot,
         html,
         loader,
         platform_events,
@@ -215,6 +341,8 @@ def install(host_version: str | None = None) -> None:
     api_mod.agent = _unsupported_agent
     api_mod.html_renderer = html.HtmlRendererFacade()
     api_mod.sp = _SharedPreferences()
+    file_token_svc = host_snapshot.FileTokenServiceFacade()
+    api_mod.file_token_service = file_token_svc
 
     event_mod = ModuleType("astrbot.api.event")
     event_mod.__path__ = []
@@ -236,6 +364,7 @@ def install(host_version: str | None = None) -> None:
     star_mod.Star = star.Star
     star_mod.Context = star.Context
     star_mod.MessageSesion = star.MessageSesion
+    star_mod.MessageSession = star.MessageSesion
     star_mod.StarTools = star.StarTools
     star_mod.register = star.register
 
@@ -312,6 +441,9 @@ def install(host_version: str | None = None) -> None:
     register_mod.register_permission_type = event.filter.permission_type
     register_mod.register_platform_adapter_type = event.filter.platform_adapter_type
     register_mod.register_custom_filter = event.filter.custom_filter
+    register_mod.register_button_action = event.filter.button_action
+    register_mod.register_ui_action = event.filter.ui_action
+    register_mod.register_on_message = event.filter.on_message
     register_mod.register_agent = _unsupported_agent
     for hook_name in (
         "on_llm_request",
@@ -377,7 +509,38 @@ def install(host_version: str | None = None) -> None:
     message_tools_mod = ModuleType("astrbot.core.tools.message_tools")
     message_tools_mod.SendMessageToUserTool = _ShellRecord
 
-    astr_main_agent_mod = ModuleType("astrbot.core.astr_main_agent")
+    def _resolve_fallback_providers(
+        provider_inst: Any,
+        plugin_context: Any,
+        fallback_ids: list[str] | Any,
+    ) -> list[Any]:
+        if not isinstance(fallback_ids, list):
+            return []
+        cur_id = str(getattr(provider_inst, "provider_config", {}).get("id", ""))
+        if not cur_id and callable(getattr(provider_inst, "meta", None)):
+            meta_obj = provider_inst.meta()
+            cur_id = str(getattr(meta_obj, "id", "") or "")
+        seen = {cur_id} if cur_id else set()
+        result: list[Any] = []
+        get_by_id = getattr(plugin_context, "get_provider_by_id", None)
+        for fid in fallback_ids:
+            if not isinstance(fid, str) or not fid or fid in seen:
+                continue
+            resolved = get_by_id(fid) if callable(get_by_id) else None
+            if resolved is not None:
+                result.append(resolved)
+                seen.add(fid)
+        return result
+
+    def _select_image_provider(
+        provider_inst: Any,
+        req: Any = None,
+        fallback_providers: list[Any] | None = None,
+    ) -> Any:
+        _ = (req, fallback_providers)
+        return provider_inst
+
+    astr_main_agent_mod = _namespace_package("astrbot.core.astr_main_agent")
     astr_main_agent_mod.MainAgentBuildConfig = _ShellRecord
     astr_main_agent_mod.build_main_agent = _unsupported(
         "build_main_agent (proactive in-plugin agent)"
@@ -385,6 +548,26 @@ def install(host_version: str | None = None) -> None:
     astr_main_agent_mod._get_session_conv = _unsupported(
         "_get_session_conv (proactive in-plugin agent)"
     )
+    astr_main_agent_mod._get_fallback_chat_providers = _resolve_fallback_providers
+    astr_main_agent_mod._select_image_chat_provider = _select_image_provider
+
+    astr_main_agent_providers_mod = ModuleType("astrbot.core.astr_main_agent.providers")
+    astr_main_agent_providers_mod.resolve_fallback_providers = (
+        _resolve_fallback_providers
+    )
+    astr_main_agent_providers_mod.select_image_provider = _select_image_provider
+
+    astr_agent_runtime_mod = _namespace_package("astrbot.core.astr_agent_runtime")
+    astr_agent_runtime_main_mod = _namespace_package(
+        "astrbot.core.astr_agent_runtime.main_agent"
+    )
+    astr_agent_runtime_providers_mod = ModuleType(
+        "astrbot.core.astr_agent_runtime.main_agent.providers"
+    )
+    astr_agent_runtime_providers_mod.resolve_fallback_providers = (
+        _resolve_fallback_providers
+    )
+    astr_agent_runtime_providers_mod.select_image_provider = _select_image_provider
 
     regex_filter_mod = ModuleType("astrbot.core.star.filter.regex")
     regex_filter_mod.RegexFilter = event.RegexFilter
@@ -405,6 +588,7 @@ def install(host_version: str | None = None) -> None:
     platform_mod.Group = event.Group
     platform_mod.PlatformStatus = event.PlatformStatus
     platform_mod.MessageSesion = star.MessageSesion
+    platform_mod.MessageSession = star.MessageSesion
 
     # Per-platform source modules legacy plugins import for isinstance
     # checks and raw bot access. Parents up to astrbot.core.platform already
@@ -505,6 +689,7 @@ def install(host_version: str | None = None) -> None:
     message_components_mod = ModuleType("astrbot.core.message.components")
     message_components_mod.BaseMessageComponent = components.BaseMessageComponent
     for name in (
+        "ComponentType",
         "Plain",
         "At",
         "AtAll",
@@ -521,6 +706,12 @@ def install(host_version: str | None = None) -> None:
         "Json",
         "Share",
         "Location",
+        "Music",
+        "Button",
+        "ActionRow",
+        "ButtonInteraction",
+        "ViewContext",
+        "UIInteraction",
         "Unknown",
         "ComponentTypes",
     ):
@@ -606,6 +797,13 @@ def install(host_version: str | None = None) -> None:
         "Poke",
         "Json",
         "Share",
+        "Location",
+        "Music",
+        "Button",
+        "ActionRow",
+        "ButtonInteraction",
+        "ViewContext",
+        "UIInteraction",
         "MessageChain",
     ):
         setattr(api_platform_mod, name, getattr(components, name))
@@ -627,11 +825,25 @@ def install(host_version: str | None = None) -> None:
     star_tools_mod.StarTools = star.StarTools
 
     star_handler_mod = ModuleType("astrbot.core.star.star_handler")
-    # Registry introspection is Host-internal; isolated plugins see an empty
-    # registry (degraded but import-safe).
+    # Populated dynamically from handshake snapshot["handlers"] during plugin load.
     star_handler_mod.star_handlers_registry = []
     star_handler_mod.StarHandlerMetadata = _ShellRecord
-    star_handler_mod.EventType = _ShellRecord
+
+    class _CompatEventType:
+        AdapterMessageEvent = "AdapterMessageEvent"
+        OnLLMRequestEvent = "OnLLMRequestEvent"
+        OnLLMResponseEvent = "OnLLMResponseEvent"
+        OnWaitingLLMRequestEvent = "OnWaitingLLMRequestEvent"
+        OnCallingLLMToolEvent = "OnCallingLLMToolEvent"
+        OnAfterMessageSentEvent = "OnAfterMessageSentEvent"
+        OnDecoratingResultEvent = "OnDecoratingResultEvent"
+        OnPluginErrorEvent = "OnPluginErrorEvent"
+        OnPluginLoadedEvent = "OnPluginLoadedEvent"
+        OnPluginUnloadedEvent = "OnPluginUnloadedEvent"
+        OnAstrBotLoadedEvent = "OnAstrBotLoadedEvent"
+        OnPlatformLoadedEvent = "OnPlatformLoadedEvent"
+
+    star_handler_mod.EventType = _CompatEventType
 
     astrbot_path_mod = ModuleType("astrbot.core.utils.astrbot_path")
 
@@ -700,6 +912,12 @@ def install(host_version: str | None = None) -> None:
         "Json",
         "Share",
         "Location",
+        "Music",
+        "Button",
+        "ActionRow",
+        "ButtonInteraction",
+        "ViewContext",
+        "UIInteraction",
         "Unknown",
         "ComponentTypes",
         "MessageChain",
@@ -752,6 +970,11 @@ def install(host_version: str | None = None) -> None:
     all_mod.event_message_type = event_mod.filter.event_message_type
     all_mod.regex = event_mod.filter.regex
     all_mod.platform_adapter_type = event_mod.filter.platform_adapter_type
+    all_mod.button_action = event_mod.filter.button_action
+    all_mod.ui_action = event_mod.filter.ui_action
+    all_mod.on_message = event_mod.filter.on_message
+    all_mod.ButtonActionFilter = event.ButtonActionFilter
+    all_mod.UIActionFilter = event.UIActionFilter
     all_mod.EventMessageType = event.EventMessageType
     all_mod.EventMessageTypeFilter = event.EventMessageTypeFilter
     all_mod.PlatformAdapterType = event.PlatformAdapterType
@@ -782,9 +1005,35 @@ def install(host_version: str | None = None) -> None:
         "Poke",
         "Json",
         "Share",
+        "Location",
+        "Music",
+        "Button",
+        "ActionRow",
+        "ButtonInteraction",
+        "ViewContext",
+        "UIInteraction",
         "MessageChain",
     ):
         setattr(all_mod, name, getattr(components_mod, name))
+
+    chatui_mod = ModuleType("astrbot.api.chatui")
+    chatui_mod.ViewSpec = chatui.ViewSpec
+    chatui_mod.ViewResult = chatui.ViewResult
+
+    core_chatui_mod = ModuleType("astrbot.core.chatui")
+    core_chatui_mod.ViewSpec = chatui.ViewSpec
+    core_chatui_mod.ViewResult = chatui.ViewResult
+
+    agents_mod = ModuleType("astrbot.api.agents")
+    for attr_name, attr_val in agents.build_agents_module_dict().items():
+        setattr(agents_mod, attr_name, attr_val)
+    agents_mod.__all__ = list(agents.build_agents_module_dict().keys())
+
+    button_filter_mod = ModuleType("astrbot.core.star.filter.button_action")
+    button_filter_mod.ButtonActionFilter = event.ButtonActionFilter
+
+    ui_filter_mod = ModuleType("astrbot.core.star.filter.ui_action")
+    ui_filter_mod.UIActionFilter = event.UIActionFilter
 
     astrbot_mod.api = api_mod
     api_mod.event = event_mod
@@ -792,6 +1041,8 @@ def install(host_version: str | None = None) -> None:
     api_mod.provider = provider_mod
     api_mod.message_components = components_mod
     api_mod.message = message_mod
+    api_mod.chatui = chatui_mod
+    api_mod.agents = agents_mod
     api_mod.all = all_mod
 
     sys.modules["astrbot"] = astrbot_mod
@@ -805,6 +1056,9 @@ def install(host_version: str | None = None) -> None:
     sys.modules["astrbot.api.all"] = all_mod
     sys.modules["astrbot.api.web"] = web_mod
     sys.modules["astrbot.api.util"] = api_util_mod
+    sys.modules["astrbot.api.chatui"] = chatui_mod
+    sys.modules["astrbot.api.agents"] = agents_mod
+    sys.modules["astrbot.core.chatui"] = core_chatui_mod
 
     # Type-only astrbot.core submodules are safe to expose; everything else
     # under astrbot.core stays blocked (live Host internals).
@@ -841,6 +1095,16 @@ def install(host_version: str | None = None) -> None:
     sys.modules["astrbot.core.tools"] = tools_pkg
     sys.modules["astrbot.core.tools.message_tools"] = message_tools_mod
     sys.modules["astrbot.core.astr_main_agent"] = astr_main_agent_mod
+    sys.modules["astrbot.core.astr_main_agent.providers"] = (
+        astr_main_agent_providers_mod
+    )
+    sys.modules["astrbot.core.astr_agent_runtime"] = astr_agent_runtime_mod
+    sys.modules["astrbot.core.astr_agent_runtime.main_agent"] = (
+        astr_agent_runtime_main_mod
+    )
+    sys.modules["astrbot.core.astr_agent_runtime.main_agent.providers"] = (
+        astr_agent_runtime_providers_mod
+    )
     sys.modules["astrbot.core.agent.hooks"] = agent_hooks_mod
     sys.modules["astrbot.core.star.filter.regex"] = regex_filter_mod
     sys.modules["astrbot.core.message"] = _namespace_package("astrbot.core.message")
@@ -863,6 +1127,8 @@ def install(host_version: str | None = None) -> None:
     sys.modules["astrbot.core.star.register"] = register_mod
     sys.modules["astrbot.core.star.filter.permission"] = permission_mod
     sys.modules["astrbot.core.star.filter.event_message_type"] = event_message_type_mod
+    sys.modules["astrbot.core.star.filter.button_action"] = button_filter_mod
+    sys.modules["astrbot.core.star.filter.ui_action"] = ui_filter_mod
     sys.modules["astrbot.core.message.components"] = message_components_mod
     sys.modules["astrbot.core.config"] = config_mod
     sys.modules["astrbot.core.config.astrbot_config"] = astrbot_config_mod
@@ -886,8 +1152,9 @@ def install(host_version: str | None = None) -> None:
     # Loudly block the real Host internals; the Runner shares the core venv,
     # so astrbot.core would import successfully without this.
     blocked_core = _BlockedModule("astrbot.core")
-    # Type-only top-level re-exports stay importable.
+    # Type-only and bridged top-level re-exports stay importable.
     blocked_core.AstrBotConfig = dict
+    blocked_core.file_token_service = file_token_svc
     sys.modules["astrbot.core"] = blocked_core
 
     _installed = True

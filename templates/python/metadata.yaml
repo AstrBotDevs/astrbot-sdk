@@ -1,0 +1,16 @@
+schema_version: 2
+name: python_template
+display_name: Python SDK Plugin Template
+desc: Starter template for an AstrBot SDK Python plugin with typed config
+version: 0.1.0
+author: your-name
+
+runtime:
+  api: sdk
+  entrypoint: main:TemplatePlugin
+  sdk_version: ">=0.1.0"
+
+capabilities:
+  required: []
+  optional:
+    - id: storage.kv

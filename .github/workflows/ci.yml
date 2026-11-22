@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-and-native:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v6
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv venv --python ${{ matrix.python-version }}
+      - name: Build native extension with maturin
+        run: |
+          uv run --extra test --extra schema --with maturin \
+            maturin develop --manifest-path rust/astrbot-py/Cargo.toml
+      - name: Verify native runtime
+        run: |
+          uv run python -c "import astrbot_sdk; assert astrbot_sdk.has_native_runtime()"
+      - name: Lint and format check Python
+        run: |
+          uv run --with ruff ruff format --check .
+          uv run --with ruff ruff check .
+      - name: Run Python test suite
+        run: |
+          uv run --extra test --extra schema pytest -q
+      - name: Build rust_echo example & run conformance
+        run: |
+          cargo build --example rust_echo -p astrbot-worker
+          cargo run -p astrbot-wire --bin astrbot-wire-conformance -- \
+            --id astrbot.rust_echo -- target/debug/examples/rust_echo examples/rust_echo
+          cargo run -p astrbot-wire --bin astrbot-wire-conformance -- \
+            --id astrbot/astrbot_plugin_hello_sdk -- \
+            .venv/bin/python -m astrbot_sdk.runtime --stdio --plugin-root examples/hello
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v6
+      - name: Create Python venv for PyO3 linker
+        run: uv venv --python 3.12
+      - name: Check Rust formatting and Clippy
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run Rust workspace tests
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          cargo test --workspace --all-features
+      - name: Build template crate check
+        run: |
+          cargo check --manifest-path templates/rust/Cargo.toml --all-targets

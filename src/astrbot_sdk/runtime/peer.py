@@ -101,6 +101,10 @@ class Peer:
         finally:
             self._pending.pop(request_id, None)
 
+    def has_pending(self, request_id: str) -> bool:
+        """Return whether an outbound request ID is still active."""
+        return request_id in self._pending
+
     async def receive(self, frame: ProtocolFrame) -> bool:
         """Process a generic bidirectional RPC frame when applicable.
 
@@ -114,7 +118,7 @@ class Peer:
             InvalidRequest: A duplicate inbound request ID is received.
         """
         if isinstance(frame, ResponseFrame):
-            future = self._pending.get(frame.id)
+            future = self._pending.pop(frame.id, None)
             if future is None:
                 return False
             if not future.done():
@@ -122,7 +126,7 @@ class Peer:
             return True
 
         if isinstance(frame, ErrorFrame):
-            future = self._pending.get(frame.id)
+            future = self._pending.pop(frame.id, None)
             if future is None:
                 return False
             if not future.done():

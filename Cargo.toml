@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/astrbot-wire",
+    "rust/astrbot-worker",
+    "rust/astrbot-py",
+]
+
+[profile.release.package.astrbot-py]
+# Stripping debug symbols with Rust 1.93+ can produce unloadable cdylibs on macOS 27.
+strip = "none"

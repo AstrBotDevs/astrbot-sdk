@@ -18,6 +18,7 @@ from ..capabilities import (
     CapabilitySet,
 )
 from ..errors import (
+    CallScopeRetired,
     CapabilityDenied,
     Conflict,
     HostUnavailable,
@@ -53,6 +54,11 @@ HostCapabilityHandler = Callable[
     [CapabilityGrant, str, Mapping[str, Any]],
     Awaitable[Any],
 ]
+HostServiceHandler = Callable[
+    [str, str, Mapping[str, Any]],
+    Awaitable[Any],
+]
+ToolsInvalidatedHandler = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +88,8 @@ class PluginHandshake:
     handlers: tuple[HandlerDescriptor, ...]
     capabilities: tuple[str, ...]
     web_routes: tuple[dict[str, Any], ...] = ()
+    services: tuple[dict[str, Any], ...] = ()
+    features: tuple[str, ...] = ()
 
 
 class StdioPluginClient:
@@ -100,6 +108,8 @@ class StdioPluginClient:
         timeout: float = 10.0,
         logger: logging.Logger | None = None,
         capability_handler: HostCapabilityHandler | None = None,
+        service_handler: HostServiceHandler | None = None,
+        tools_invalidated_handler: ToolsInvalidatedHandler | None = None,
         legacy: bool = False,
         env: Mapping[str, str] | None = None,
         start_timeout: float | None = None,
@@ -113,6 +123,8 @@ class StdioPluginClient:
             timeout: Request and process shutdown timeout in seconds.
             logger: Logger used for Runner stderr.
             capability_handler: Dispatcher for authorized Runner-to-Host calls.
+            service_handler: Dispatcher for `plugin.service.invoke` calls.
+            tools_invalidated_handler: Callback invoked on `tools.invalidate`.
             legacy: Load the plugin through the legacy compat layer.
             env: Extra environment variables merged over the parent env.
             start_timeout: Timeout for the initialize handshake; defaults to
@@ -126,12 +138,15 @@ class StdioPluginClient:
         self.timeout = timeout
         self.logger = logger or logging.getLogger("astrbot.plugin_runner")
         self.capability_handler = capability_handler
+        self.service_handler = service_handler
+        self.tools_invalidated_handler = tools_invalidated_handler
         self.handshake: PluginHandshake | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._peer: Peer | None = None
         self._granted_capabilities = CapabilitySet()
+        self._active_call_ids: set[str] = set()
         self._streams: dict[
             str,
             asyncio.Queue[ProtocolFrame | Exception],
@@ -200,6 +215,17 @@ class StdioPluginClient:
                             }
                             for grant in grants.values()
                         ],
+                        "features": [
+                            "cancel_v1",
+                            "capability_update_v1",
+                            "direct_service_v1",
+                            "dynamic_tools_v1",
+                            "external_attach_v1",
+                            "live_config_v1",
+                            "plugin_service_v1",
+                            "resume_stream_v1",
+                            "scoped_host_v1",
+                        ],
                     },
                 )
             except TimeoutError as exc:
@@ -234,15 +260,11 @@ class StdioPluginClient:
         """Resolve the effective capability grants for this Runner.
 
         Local runners are intersected with the plugin's declared
-        capabilities from its on-disk metadata; legacy runners declare
-        nothing, so the Host grants apply directly.
+        capabilities from its on-disk metadata; legacy and external runners
+        without a local checkout receive Host grants directly.
         """
-        if self.legacy:
-            # Legacy plugins declare no capabilities; the compat facade is
-            # constrained by whatever the Host grants directly.
+        if self.legacy or self.plugin_root is None:
             return granted_capabilities or CapabilitySet()
-        if self.plugin_root is None:
-            raise InvalidRequest("local runners require a plugin root")
         declared_capabilities = load_metadata(
             self.plugin_root,
         ).capabilities.all_ids
@@ -259,21 +281,46 @@ class StdioPluginClient:
 
     async def _open_transport(self) -> FrameTransport:
         """Spawn the local Runner subprocess and wrap its stdio pipes."""
-        argv = [
-            self.python_executable,
-            "-m",
-            "astrbot_sdk.runtime",
-            "--stdio",
-            "--plugin-root",
-            str(self.plugin_root),
-        ]
-        if self.legacy:
-            argv.append("--legacy")
+        if self.plugin_root is None:
+            raise InvalidRequest("local runners require a plugin root")
+        cwd: str | None = None
+        if not self.legacy:
+            meta = load_metadata(self.plugin_root)
+            if meta.runtime.command:
+                cmd0 = meta.runtime.command[0]
+                candidate = self.plugin_root / cmd0
+                executable = (
+                    str(candidate)
+                    if candidate.exists() or "/" in cmd0 or "\\" in cmd0
+                    else cmd0
+                )
+                argv = [executable, *meta.runtime.command[1:]]
+                cwd = str(self.plugin_root)
+            else:
+                argv = [
+                    self.python_executable,
+                    "-m",
+                    "astrbot_sdk.runtime",
+                    "--stdio",
+                    "--plugin-root",
+                    str(self.plugin_root),
+                ]
+        else:
+            argv = [
+                self.python_executable,
+                "-m",
+                "astrbot_sdk.runtime",
+                "--stdio",
+                "--plugin-root",
+                str(self.plugin_root),
+                "--legacy",
+            ]
         self._process = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
             env=runner_env(self._extra_env),
             limit=MAX_FRAME_BYTES + 1,
         )
@@ -327,6 +374,7 @@ class StdioPluginClient:
         invocation_id = f"host-invoke:{uuid.uuid4().hex}"
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
         self._streams[invocation_id] = queue
+        self._active_call_ids.add(invocation_id)
         completed = False
         expected_sequence = 0
         try:
@@ -377,10 +425,90 @@ class StdioPluginClient:
                         f"unexpected invocation frame: {type(frame).__name__}"
                     )
         finally:
+            self._active_call_ids.discard(invocation_id)
             self._streams.pop(invocation_id, None)
             if not completed and self.is_running:
                 with contextlib.suppress(HostUnavailable):
                     await self._send(CancelFrame(id=invocation_id))
+
+    async def invoke_resumable(
+        self,
+        handler_id: str,
+        *args: Any,
+        invocation_id: str | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[EventResult | None]:
+        """Invoke a handler over a resumable stream, deduplicating replayed yields."""
+        if not self.is_running:
+            raise HostUnavailable("plugin Runner is not running")
+
+        req_id = invocation_id or f"host-invoke:{uuid.uuid4().hex}"
+        queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
+        self._streams[req_id] = queue
+        self._active_call_ids.add(req_id)
+        completed = False
+        expected_sequence = 0
+        try:
+            await self._send(
+                RequestFrame(
+                    id=req_id,
+                    method="resumable.invoke",
+                    params={
+                        "handler_id": handler_id,
+                        "args": [encode_value(value) for value in args],
+                        "kwargs": {
+                            key: encode_value(value) for key, value in kwargs.items()
+                        },
+                    },
+                )
+            )
+            while True:
+                frame = await queue.get()
+                if isinstance(frame, Exception):
+                    raise frame
+                if isinstance(frame, YieldFrame):
+                    if frame.sequence <= expected_sequence:
+                        await self._send(AckFrame(id=req_id, sequence=frame.sequence))
+                        continue
+                    expected_sequence += 1
+                    if frame.sequence != expected_sequence:
+                        raise InvalidRequest("remote yield sequence does not match")
+                    result = decode_result(frame.result)
+                    stopped = (
+                        result is not None and result.propagation is Propagation.STOP
+                    )
+                    if stopped:
+                        completed = True
+                    yield result
+                    if stopped:
+                        return
+                    await self._send(AckFrame(id=req_id, sequence=frame.sequence))
+                elif isinstance(frame, ResponseFrame):
+                    completed = True
+                    return
+                elif isinstance(frame, ErrorFrame):
+                    completed = True
+                    raise RemotePluginError(frame.code, frame.message)
+                else:
+                    raise InvalidRequest(
+                        f"unexpected invocation frame: {type(frame).__name__}"
+                    )
+        finally:
+            self._active_call_ids.discard(req_id)
+            self._streams.pop(req_id, None)
+            if not completed and self.is_running:
+                with contextlib.suppress(HostUnavailable):
+                    await self._send(CancelFrame(id=req_id))
+
+    def attach_resumable_queue(
+        self,
+        invocation_id: str,
+    ) -> asyncio.Queue[ProtocolFrame | Exception]:
+        """Re-register a stream queue across transport reconnects."""
+        queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
+        self._streams[invocation_id] = queue
+        self._active_call_ids.add(invocation_id)
+        return queue
 
     async def invoke_web(
         self,
@@ -410,6 +538,7 @@ class StdioPluginClient:
         invocation_id = f"host-invoke:{uuid.uuid4().hex}"
         queue: asyncio.Queue[ProtocolFrame | Exception] = asyncio.Queue()
         self._streams[invocation_id] = queue
+        self._active_call_ids.add(invocation_id)
         completed = False
         expected_sequence = 0
         try:
@@ -446,6 +575,7 @@ class StdioPluginClient:
                         f"unexpected invocation frame: {type(frame).__name__}"
                     )
         finally:
+            self._active_call_ids.discard(invocation_id)
             self._streams.pop(invocation_id, None)
             if not completed and self.is_running:
                 with contextlib.suppress(HostUnavailable):
@@ -548,6 +678,51 @@ class StdioPluginClient:
         """Probe Runner liveness; returns its protocol version payload."""
         return await self._request("ping", {})
 
+    async def validate_config(self, config: Any) -> Any:
+        """Ask the Runner to validate a candidate configuration without applying it."""
+        return await self._request("validate_config", {"config": encode_value(config)})
+
+    async def configure(self, config: Any) -> Any:
+        """Apply a confirmed configuration update live on the running Runner."""
+        return await self._request("configure", {"config": encode_value(config)})
+
+    async def update_capabilities(
+        self,
+        granted_capabilities: CapabilitySet,
+    ) -> CapabilitySet:
+        """Atomically update the granted capability set on the Runner."""
+        effective = self._compute_grants(granted_capabilities)
+        await self._request(
+            "capabilities.update",
+            {
+                "capabilities": [
+                    {"id": grant.id, "scope": encode_value(grant.scope)}
+                    for grant in effective.values()
+                ]
+            },
+        )
+        self._granted_capabilities = effective
+        return effective
+
+    async def invoke_service(
+        self,
+        service: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Invoke an exported plugin service handler."""
+        result = await self._request(
+            "invoke_service",
+            {
+                "service": service,
+                "input": encode_value(dict(payload or {})),
+            },
+        )
+        return decode_value(result)
+
+    async def discover_tools(self) -> Any:
+        """Invoke `@on.tool_discovery` and return the current dynamic tool snapshot."""
+        return await self._request("tools.discover", {})
+
     async def session_consider(
         self,
         event: Any,
@@ -609,7 +784,7 @@ class StdioPluginClient:
         if process is not None and process.returncode is None:
             process.kill()
 
-    async def close(self) -> None:
+    async def close(self, *, reason: str = "shutdown") -> None:
         """Shut down the Runner and release transport resources."""
         if not self._started:
             return
@@ -621,7 +796,7 @@ class StdioPluginClient:
                     TimeoutError,
                 ):
                     await asyncio.wait_for(
-                        self._request("shutdown", {}),
+                        self._request("shutdown", {"reason": reason}),
                         timeout=self.timeout,
                     )
             await self._close_transport()
@@ -634,6 +809,7 @@ class StdioPluginClient:
             self._peer = None
             self.handshake = None
             self._granted_capabilities = CapabilitySet()
+            self._active_call_ids.clear()
             self._started = False
 
     async def _request(
@@ -667,19 +843,54 @@ class StdioPluginClient:
         return await peer.request(method, params, timeout_seconds=effective)
 
     async def _handle_runner_request(self, frame: RequestFrame) -> Any:
-        """Authorize and dispatch one Runner-to-Host capability call.
+        """Authorize and dispatch one Runner-to-Host request.
 
         Args:
             frame: Request received from this client's bound Runner connection.
 
         Returns:
-            Encoded Host capability result.
+            Encoded Host response payload.
 
         Raises:
+            CallScopeRetired: `parent_call_id` refers to an already finished call.
             InvalidRequest: The request method or payload is malformed.
             CapabilityDenied: The capability is not granted on this connection.
-            NotFound: No Host capability dispatcher is configured.
+            NotFound: No Host dispatcher is configured.
         """
+        if frame.method == "tools.invalidate":
+            if self.tools_invalidated_handler is not None:
+                await self.tools_invalidated_handler()
+            return {"invalidated": True}
+
+        if frame.method in ("capability.invoke", "plugin.service.invoke"):
+            raw_parent = frame.params.get("parent_call_id")
+            if raw_parent is not None:
+                cid = str(raw_parent)
+                active = cid in self._active_call_ids or (
+                    self._peer is not None and self._peer.has_pending(cid)
+                )
+                if not active:
+                    raise CallScopeRetired(f"call scope has retired: {cid}")
+
+        if frame.method == "plugin.service.invoke":
+            plugin_id = frame.params.get("plugin_id")
+            service = frame.params.get("service")
+            payload = decode_value(frame.params.get("input", {}))
+            if payload is None:
+                payload = {}
+            if (
+                not isinstance(plugin_id, str)
+                or not plugin_id
+                or not isinstance(service, str)
+                or not service
+                or not isinstance(payload, Mapping)
+            ):
+                raise InvalidRequest("plugin.service.invoke request is invalid")
+            if self.service_handler is None:
+                raise NotFound("Host plugin service router is unavailable")
+            result = await self.service_handler(plugin_id, service, payload)
+            return encode_value(result)
+
         if frame.method != "capability.invoke":
             raise InvalidRequest(f"unknown Host method: {frame.method}")
 
@@ -795,6 +1006,22 @@ class StdioPluginClient:
         if not isinstance(web_routes, list):
             raise InvalidRequest("initialize web_routes must be a list")
 
+        raw_services = result.get("services")
+        if raw_services is None:
+            raw_services = []
+        if not isinstance(raw_services, list) or not all(
+            isinstance(item, Mapping) for item in raw_services
+        ):
+            raise InvalidRequest("initialize services must be a list of objects")
+
+        raw_features = result.get("features")
+        if raw_features is None:
+            raw_features = []
+        if not isinstance(raw_features, list) or not all(
+            isinstance(item, str) for item in raw_features
+        ):
+            raise InvalidRequest("initialize features must be a list of strings")
+
         handlers: list[HandlerDescriptor] = []
         try:
             for raw_handler in raw_handlers:
@@ -837,6 +1064,8 @@ class StdioPluginClient:
             handlers=tuple(handlers),
             capabilities=tuple(raw_capabilities),
             web_routes=tuple(dict(item) for item in web_routes),
+            services=tuple(dict(item) for item in raw_services),
+            features=tuple(raw_features),
         )
 
     async def _send(
@@ -866,6 +1095,8 @@ class StdioPluginClient:
         try:
             while (line := await transport.read()) is not None:
                 frame = decode_frame(line)
+                if isinstance(frame, (ErrorFrame, ResponseFrame)):
+                    self._active_call_ids.discard(frame.id)
                 if await peer.receive(frame):
                     continue
                 if isinstance(frame, (ErrorFrame, ResponseFrame, YieldFrame)):
@@ -885,6 +1116,12 @@ class StdioPluginClient:
                         continue
                     self.logger.debug(
                         "Ignoring late Runner ack for %s",
+                        frame.id,
+                    )
+                    continue
+                if isinstance(frame, CancelFrame):
+                    self.logger.debug(
+                        "Ignoring late Runner cancel for %s",
                         frame.id,
                     )
                     continue

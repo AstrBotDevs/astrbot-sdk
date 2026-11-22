@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RustEchoConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "prefix": {
+      "type": "string",
+      "default": "",
+      "description": "Echo prefix"
+    }
+  }
+}

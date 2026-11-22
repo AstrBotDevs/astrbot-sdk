@@ -13,6 +13,7 @@ import asyncio
 import copy
 import fnmatch
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -470,6 +471,89 @@ class ProviderManagerFacade:
             return TTSProvider(self._ctx, provider_id=provider_id)
         raise ValueError(f"Unknown provider type: {provider_type}")
 
+    async def set_provider(
+        self,
+        provider_id: str,
+        provider_type: Any,
+        umo: Any = None,
+    ) -> None:
+        """Persist the active provider selection via the host provider service.
+
+        Args:
+            provider_id: Target provider identifier.
+            provider_type: Legacy ProviderType enum member or its string value.
+            umo: Optional session identifier for per-session overrides.
+        """
+        kind = _legacy_type_from_any(provider_type)
+        umo_text = _umo_str(umo)
+        await self._ctx._invoke_capability(
+            "provider.write",
+            "set_provider",
+            {
+                "provider_id": str(provider_id),
+                "provider_type": _PREF_KEY_BY_KIND[kind],
+                "umo": umo_text,
+            },
+        )
+        if umo_text:
+            prefs = self._snapshot.setdefault("provider_umo_prefs", {})
+            prefs.setdefault(umo_text, {})[_PREF_KEY_BY_KIND[kind]] = str(provider_id)
+        else:
+            defaults = self._snapshot.setdefault("provider_defaults", {})
+            defaults[_SNAPSHOT_KEY_BY_KIND[kind]] = str(provider_id)
+
+    async def create_provider(self, new_config: dict[str, Any]) -> None:
+        """Create and load a provider on the host runtime.
+
+        Args:
+            new_config: Provider configuration mapping including an ``id``.
+        """
+        await self._ctx._invoke_capability(
+            "provider.write",
+            "create_provider",
+            {"new_config": dict(new_config)},
+        )
+
+    async def update_provider(
+        self,
+        origin_provider_id: str,
+        new_config: dict[str, Any],
+    ) -> None:
+        """Update an existing host provider configuration and reload it.
+
+        Args:
+            origin_provider_id: Existing provider identifier to update.
+            new_config: Replacement provider configuration mapping.
+        """
+        await self._ctx._invoke_capability(
+            "provider.write",
+            "update_provider",
+            {
+                "origin_provider_id": str(origin_provider_id),
+                "new_config": dict(new_config),
+            },
+        )
+
+    async def delete_provider(
+        self,
+        provider_id: str | None = None,
+        provider_source_id: str | None = None,
+    ) -> None:
+        """Delete a provider or provider source on the host runtime.
+
+        Args:
+            provider_id: Specific provider instance identifier to delete.
+            provider_source_id: Provider source identifier matching providers.
+        """
+        await self._ctx._invoke_capability(
+            "provider.write",
+            "delete_provider",
+            {
+                "provider_id": provider_id,
+                "provider_source_id": provider_source_id,
+            },
+        )
+
 
 def copy_global_config(snapshot: dict, umo: str | None) -> GlobalConfig:
     """Return a deep-copied routed global config facade."""
@@ -493,12 +577,54 @@ class PlatformFacade:
             facade_context: Legacy Context facade used to reach the Host.
             entry: Snapshot platform metadata dict (id/name/description).
         """
+        from .event import PlatformStatus
+
         self._facade_context = facade_context
         self._entry = dict(entry)
         # Legacy plugins read platform.config (e.g. bot.platform.config for
         # the qq_official appid); the snapshot ships it redacted by the Host.
         self.config: dict = dict(entry.get("config") or {})
         self.client_self_id = ""
+        raw_status = str(self._entry.get("status") or PlatformStatus.RUNNING.value)
+        try:
+            self._status = PlatformStatus(raw_status)
+        except ValueError:
+            self._status = PlatformStatus.RUNNING
+
+    @property
+    def status(self) -> Any:
+        """Return the legacy PlatformStatus enum value for this adapter."""
+        return self._status
+
+    @status.setter
+    def status(self, value: Any) -> None:
+        """Update the cached PlatformStatus on this facade."""
+        self._status = value
+
+    @property
+    def errors(self) -> list[Any]:
+        """Return snapshot-safe empty error list (host manages adapter errors)."""
+        return []
+
+    @property
+    def last_error(self) -> Any:
+        """Return None (host manages adapter errors)."""
+        return None
+
+    async def send_by_session(self, session: Any, message_chain: Any) -> Any:
+        """Forward proactive session sends through Context.send_message."""
+        from .star import MessageSesion
+
+        if isinstance(session, str):
+            target: Any = MessageSesion.from_str(session)
+        elif not getattr(session, "platform_name", None):
+            platform_id = self._entry.get("id") or self._entry.get("name") or ""
+            msg_type = getattr(session, "message_type", "FriendMessage")
+            sid = getattr(session, "session_id", str(session))
+            target = MessageSesion(platform_id, msg_type, sid)
+        else:
+            target = session
+        return await self._facade_context.send_message(target, message_chain)
 
     def meta(self) -> Any:
         """Return the adapter metadata namespace (mirrors core Platform.meta)."""
@@ -685,3 +811,250 @@ class AstrbotConfigMgrFacade:
             if item.get("id") == "default":
                 fallback = dict(item)
         return fallback
+
+
+class DbReadFacade:
+    """Read-only database facade over ``db.read`` with explicit write guards."""
+
+    def __init__(self, facade_context: Any) -> None:
+        self._facade_context = facade_context
+
+    async def get_umo_aliases(
+        self,
+        umos: list[str] | None = None,
+    ) -> list[SimpleNamespace]:
+        """Return UMO alias records matching optional UMO list."""
+        result = await self._facade_context._ctx._invoke_capability(
+            "db.read",
+            "get_umo_aliases",
+            {"umos": list(umos) if umos is not None else None},
+        )
+        return [
+            SimpleNamespace(**dict(row)) for row in (result or {}).get("aliases") or []
+        ]
+
+    async def get_conversations(
+        self,
+        user_id: str | None = None,
+        platform_id: str | None = None,
+    ) -> list[SimpleNamespace]:
+        """Return ConversationV2 metadata rows without message content."""
+        result = await self._facade_context._ctx._invoke_capability(
+            "db.read",
+            "get_conversations",
+            {"user_id": user_id, "platform_id": platform_id},
+        )
+        return [
+            SimpleNamespace(**dict(row))
+            for row in (result or {}).get("conversations") or []
+        ]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Raw SQL session context manager is host-internal (unsupported)."""
+        raise IsolationUnsupportedError(
+            "raw database session access is unavailable in isolated legacy mode; "
+            "only read-only get_umo_aliases/get_conversations are bridged"
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise IsolationUnsupportedError(
+            f"db.{name} is unavailable in isolated legacy mode; only read-only "
+            "get_umo_aliases/get_conversations are bridged"
+        )
+
+
+class EventQueueFacade:
+    """Legacy ``context.get_event_queue()`` facade over ``event.inject``."""
+
+    def __init__(self, facade_context: Any) -> None:
+        self._facade_context = facade_context
+
+    @staticmethod
+    def _build_payload(event: Any) -> dict[str, Any]:
+        from .components import MessageChain
+
+        raw_messages = event.get_messages() if hasattr(event, "get_messages") else []
+        sdk_chain = MessageChain(chain=list(raw_messages or [])).to_sdk()
+        extras = event.get_extra() if hasattr(event, "get_extra") else {}
+        return {
+            "umo": str(
+                getattr(event, "unified_msg_origin", None)
+                or getattr(event, "session", "")
+            ),
+            "chain": sdk_chain,
+            "message_str": str(
+                event.get_message_str()
+                if hasattr(event, "get_message_str")
+                else getattr(event, "message_str", "")
+            ),
+            "sender_id": str(
+                event.get_sender_id() if hasattr(event, "get_sender_id") else ""
+            ),
+            "sender_name": str(
+                event.get_sender_name() if hasattr(event, "get_sender_name") else ""
+            ),
+            "self_id": str(
+                event.get_self_id() if hasattr(event, "get_self_id") else ""
+            ),
+            "is_wake": bool(
+                event.is_wake_up()
+                if hasattr(event, "is_wake_up")
+                else getattr(event, "is_wake", True)
+            ),
+            "extras": dict(extras) if isinstance(extras, dict) else {},
+        }
+
+    async def put(self, event: Any) -> None:
+        """Queue one legacy message event onto the Host pipeline."""
+        await self._facade_context._ctx._invoke_capability(
+            "event.inject",
+            "inject",
+            self._build_payload(event),
+        )
+
+    def put_nowait(self, event: Any) -> None:
+        """Schedule event injection without blocking the caller."""
+        task = asyncio.get_running_loop().create_task(self.put(event))
+        self._facade_context._pending.append(task)
+
+
+class FileTokenServiceFacade:
+    """Legacy ``file_token_service`` facade over ``file.token``."""
+
+    _ctx: Any = None
+
+    @classmethod
+    def initialize(cls, ctx: Any) -> None:
+        """Bind the active SDK context for runner-local calls."""
+        cls._ctx = ctx
+
+    async def register_file(
+        self,
+        file_path: str | Path,
+        timeout: float | None = None,
+        single_use: bool = True,
+    ) -> str:
+        """Upload a local file to Host asset store and register a download token."""
+        if self._ctx is None:
+            raise ValueError("file_token_service not initialized")
+        return await self._ctx.assets.issue_download_token(
+            Path(file_path),
+            timeout=timeout,
+            single_use=single_use,
+        )
+
+
+class SubagentOrchestratorFacade:
+    """Legacy ``context.subagent_orchestrator`` facade over ``subagents.reload``."""
+
+    def __init__(self, facade_context: Any, snapshot: dict[str, Any]) -> None:
+        self._facade_context = facade_context
+        self.handoffs = [
+            SimpleNamespace(**dict(entry))
+            for entry in snapshot.get("subagent_handoffs") or []
+        ]
+
+    async def reload_from_config(self, cfg: dict[str, Any]) -> list[SimpleNamespace]:
+        """Reload Host subagent handoffs from configuration dict."""
+        result = await self._facade_context._ctx._invoke_capability(
+            "subagents.reload",
+            "reload",
+            {"config": dict(cfg)},
+        )
+        self.handoffs = [
+            SimpleNamespace(**dict(entry))
+            for entry in (result or {}).get("handoffs") or []
+        ]
+        return list(self.handoffs)
+
+
+class StarManagerFacade:
+    """Legacy ``context._star_manager`` facade over ``plugin.lifecycle``."""
+
+    def __init__(self, facade_context: Any) -> None:
+        self._facade_context = facade_context
+
+    async def turn_off_plugin(self, plugin_name: str) -> None:
+        """Disable a plugin by name on the Host."""
+        await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "turn_off",
+            {"plugin_name": plugin_name},
+        )
+
+    async def turn_on_plugin(self, plugin_name: str) -> None:
+        """Enable a plugin by name on the Host."""
+        await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "turn_on",
+            {"plugin_name": plugin_name},
+        )
+
+    async def reload(self, specified_plugin_name: str | None = None) -> None:
+        """Reload one plugin or all plugins on the Host."""
+        await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "reload",
+            {"plugin_name": specified_plugin_name},
+        )
+
+    async def install_plugin(
+        self,
+        repo_url: str = "",
+        proxy: str = "",
+        *,
+        ignore_version_check: bool = False,
+        download_url: str = "",
+    ) -> Any:
+        """Install a plugin through the Host plugin manager."""
+        result = await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "install",
+            {
+                "repo_url": repo_url,
+                "proxy": proxy,
+                "ignore_version_check": ignore_version_check,
+                "download_url": download_url,
+            },
+        )
+        return (result or {}).get("result")
+
+    async def update_plugin(
+        self,
+        plugin_name: str,
+        proxy: str = "",
+        *,
+        download_url: str = "",
+        repo_url: str = "",
+    ) -> None:
+        """Update an installed plugin through the Host plugin manager."""
+        await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "update",
+            {
+                "plugin_name": plugin_name,
+                "proxy": proxy,
+                "download_url": download_url,
+                "repo_url": repo_url,
+            },
+        )
+
+    async def uninstall_plugin(
+        self,
+        plugin_name: str,
+        delete_config: bool = False,
+        delete_data: bool = False,
+    ) -> bool:
+        """Uninstall a plugin through the Host plugin manager."""
+        result = await self._facade_context._ctx._invoke_capability(
+            "plugin.lifecycle",
+            "uninstall",
+            {
+                "plugin_name": plugin_name,
+                "delete_config": delete_config,
+                "delete_data": delete_data,
+            },
+        )
+        return bool((result or {}).get("uninstalled"))

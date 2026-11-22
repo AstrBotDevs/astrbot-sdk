@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeVar
 
 from .errors import (
     DuplicateHandlerID,
@@ -17,12 +17,15 @@ from .events import MessageType, SenderRole
 
 _HANDLER_SPEC_ATTR = "__astrbot_handler_spec__"
 _HANDLER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
 
 
 class HandlerKind(StrEnum):
     COMMAND = "command"
     MESSAGE = "message"
     TOOL = "tool"
+    SERVICE = "service"
+    DIRECT_SERVICE = "direct_service"
     HOOK_LLM_REQUEST = "hook.llm_request"
     HOOK_LLM_RESPONSE = "hook.llm_response"
     HOOK_TOOL_CALL = "hook.tool_call"
@@ -36,7 +39,10 @@ class HandlerKind(StrEnum):
     HOOK_PLUGIN_LOADED = "hook.plugin_loaded"
     HOOK_PLUGIN_UNLOADED = "hook.plugin_unloaded"
     LIFECYCLE_STARTUP = "lifecycle.startup"
+    LIFECYCLE_VALIDATE_CONFIG = "lifecycle.validate_config"
     LIFECYCLE_CONFIG_CHANGED = "lifecycle.config_changed"
+    LIFECYCLE_HEALTH = "lifecycle.health"
+    LIFECYCLE_TOOL_DISCOVERY = "lifecycle.tool_discovery"
     LIFECYCLE_SHUTDOWN = "lifecycle.shutdown"
 
 
@@ -73,8 +79,18 @@ _HOOK_KINDS = frozenset(
 _LIFECYCLE_KINDS = frozenset(
     {
         HandlerKind.LIFECYCLE_STARTUP,
+        HandlerKind.LIFECYCLE_VALIDATE_CONFIG,
         HandlerKind.LIFECYCLE_CONFIG_CHANGED,
+        HandlerKind.LIFECYCLE_HEALTH,
+        HandlerKind.LIFECYCLE_TOOL_DISCOVERY,
         HandlerKind.LIFECYCLE_SHUTDOWN,
+    }
+)
+_ONE_PARAM_LIFECYCLE_KINDS = frozenset(
+    {
+        HandlerKind.LIFECYCLE_STARTUP,
+        HandlerKind.LIFECYCLE_HEALTH,
+        HandlerKind.LIFECYCLE_TOOL_DISCOVERY,
     }
 )
 
@@ -90,12 +106,23 @@ class HandlerSpec:
     # Legacy command groups: the handler is a registration anchor only; the
     # host renders the group's usage tree on a bare group-name message.
     group: bool = False
+    group_custom_filters: bool = False
+    sub_command: bool = False
     tool_name: str | None = None
+    resumable: bool = False
+    streaming_input: bool = False
+    service_name: str | None = None
+    direct: bool = False
+    input_schema: Mapping[str, Any] | None = None
     message_types: tuple[MessageType, ...] = ()
     platforms: tuple[str, ...] = ()
     roles: tuple[SenderRole, ...] = ()
     regex: str | None = None
     regex_flags: int = 0
+    button_action: bool = False
+    button_action_id: str | None = None
+    ui_action: bool = False
+    ui_action_id: str | None = None
 
     @property
     def required_capability(self) -> str | None:
@@ -136,7 +163,7 @@ def _validate_handler_id(handler_id: str | None) -> None:
         )
 
 
-def _attach_handler_spec[HandlerT: Callable[..., Any]](
+def _attach_handler_spec(
     handler: HandlerT,
     spec: HandlerSpec,
 ) -> HandlerT:
@@ -161,13 +188,19 @@ def _attach_handler_spec[HandlerT: Callable[..., Any]](
             raise InvalidHandlerSignature(
                 f"{spec.kind.value} handler cannot be an async generator"
             )
-        expected_parameters = 1 if spec.kind is HandlerKind.LIFECYCLE_STARTUP else 2
+        expected_parameters = 1 if spec.kind in _ONE_PARAM_LIFECYCLE_KINDS else 2
         if len(parameters) != expected_parameters:
             raise InvalidHandlerSignature(
                 f"{spec.kind.value} handler has an invalid signature"
             )
-    if spec.kind is HandlerKind.TOOL and inspect.isasyncgenfunction(handler):
-        raise InvalidHandlerSignature("tool handler cannot be an async generator")
+    if spec.kind in (
+        HandlerKind.TOOL,
+        HandlerKind.SERVICE,
+        HandlerKind.DIRECT_SERVICE,
+    ) and inspect.isasyncgenfunction(handler):
+        raise InvalidHandlerSignature(
+            f"{spec.kind.value} handler cannot be an async generator"
+        )
     if spec.kind in _HOOK_KINDS and inspect.isasyncgenfunction(handler):
         raise InvalidHandlerSignature("hook handler cannot be an async generator")
 
@@ -176,7 +209,7 @@ def _attach_handler_spec[HandlerT: Callable[..., Any]](
 
 
 class _OnNamespace:
-    def command[HandlerT: Callable[..., Any]](
+    def command(
         self,
         path: str,
         *,
@@ -207,12 +240,14 @@ class _OnNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def tool[HandlerT: Callable[..., Any]](
+    def tool(
         self,
         name: str,
         *,
         description: str,
         id: str | None = None,
+        resumable: bool = False,
+        streaming_input: bool = False,
     ) -> Callable[[HandlerT], HandlerT]:
         """Register a static LLM tool handler.
 
@@ -220,6 +255,8 @@ class _OnNamespace:
             name: Tool name exposed to the LLM.
             description: Tool description shown to the LLM.
             id: Optional stable handler ID within the plugin.
+            resumable: Whether external runs may resume across disconnects.
+            streaming_input: Whether the tool consumes streamed argument deltas.
         """
         if not name or not name.replace("_", "").isalnum():
             raise InvalidPluginDefinition(
@@ -233,10 +270,88 @@ class _OnNamespace:
             id=id,
             description=description,
             tool_name=name,
+            resumable=resumable,
+            streaming_input=streaming_input,
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def message[HandlerT: Callable[..., Any]](
+    def streaming_tool(
+        self,
+        name: str,
+        *,
+        description: str,
+        id: str | None = None,
+        resumable: bool = False,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Register a streaming-input LLM tool handler."""
+        return self.tool(
+            name,
+            description=description,
+            id=id,
+            resumable=resumable,
+            streaming_input=True,
+        )
+
+    def service(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        id: str | None = None,
+        input_schema: Mapping[str, Any] | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Export a Host-scoped cross-plugin service handler."""
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            raise InvalidPluginDefinition(
+                "service name must contain only letters, numbers, '_' and '-'"
+            )
+        _validate_handler_id(id)
+        spec = HandlerSpec(
+            kind=HandlerKind.SERVICE,
+            id=id or f"service:{name}",
+            description=description,
+            service_name=name,
+            direct=False,
+            input_schema=dict(input_schema) if input_schema is not None else None,
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
+
+    def direct_service(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        id: str | None = None,
+        input_schema: Mapping[str, Any] | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Export a revocable direct-mode cross-plugin service handler.
+
+        Direct service handlers execute with `DirectContext` and carry no Host
+        or cross-plugin invocation privileges.
+        """
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            raise InvalidPluginDefinition(
+                "service name must contain only letters, numbers, '_' and '-'"
+            )
+        _validate_handler_id(id)
+        spec = HandlerSpec(
+            kind=HandlerKind.DIRECT_SERVICE,
+            id=id or f"service:{name}",
+            description=description,
+            service_name=name,
+            direct=True,
+            input_schema=dict(input_schema) if input_schema is not None else None,
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
+
+    def tool_discovery(self, handler: HandlerT) -> HandlerT:
+        """Register an async method returning dynamic runtime tools."""
+        return _attach_handler_spec(
+            handler,
+            HandlerSpec(kind=HandlerKind.LIFECYCLE_TOOL_DISCOVERY),
+        )
+
+    def message(
         self,
         *,
         message_types: Collection[MessageType] = (),
@@ -270,10 +385,54 @@ class _OnNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
+    def button_action(
+        self,
+        action_id: str | None = None,
+        *,
+        message_types: Collection[MessageType] = (),
+        platforms: Collection[str] = (),
+        roles: Collection[SenderRole] = (),
+        priority: int = 0,
+        id: str | None = None,
+        description: str | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Register a handler triggered by callback button interactions."""
+        _validate_handler_id(id)
+        spec = HandlerSpec(
+            kind=HandlerKind.MESSAGE,
+            id=id,
+            description=description,
+            priority=priority,
+            message_types=tuple(message_types),
+            platforms=tuple(platforms),
+            roles=tuple(roles),
+            button_action=True,
+            button_action_id=action_id,
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
 
-def _lifecycle[HandlerT: Callable[..., Any]](
-    kind: HandlerKind,
-) -> Callable[[HandlerT], HandlerT]:
+    def ui_action(
+        self,
+        action_id: str | None = None,
+        *,
+        priority: int = 0,
+        id: str | None = None,
+        description: str | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Register a handler triggered by authenticated ChatUI view actions."""
+        _validate_handler_id(id)
+        spec = HandlerSpec(
+            kind=HandlerKind.MESSAGE,
+            id=id,
+            description=description,
+            priority=priority,
+            ui_action=True,
+            ui_action_id=action_id,
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
+
+
+def _lifecycle(kind: HandlerKind) -> Callable[[HandlerT], HandlerT]:
     def decorator(handler: HandlerT) -> HandlerT:
         return _attach_handler_spec(handler, HandlerSpec(kind=kind))
 
@@ -304,7 +463,7 @@ class _HooksNamespace:
     stage DTO, and return None or a Decision.
     """
 
-    def llm_request[HandlerT: Callable[..., Any]](
+    def llm_request(
         self,
         *,
         priority: int = 0,
@@ -320,7 +479,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def llm_response[HandlerT: Callable[..., Any]](
+    def llm_response(
         self,
         *,
         priority: int = 0,
@@ -336,7 +495,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def tool_call[HandlerT: Callable[..., Any]](
+    def tool_call(
         self,
         *,
         priority: int = 0,
@@ -352,7 +511,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def tool_result[HandlerT: Callable[..., Any]](
+    def tool_result(
         self,
         *,
         priority: int = 0,
@@ -368,7 +527,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def message_result[HandlerT: Callable[..., Any]](
+    def message_result(
         self,
         *,
         priority: int = 0,
@@ -384,7 +543,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def message_sent[HandlerT: Callable[..., Any]](
+    def message_sent(
         self,
         *,
         priority: int = 0,
@@ -400,7 +559,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def agent_start[HandlerT: Callable[..., Any]](
+    def agent_start(
         self,
         *,
         priority: int = 0,
@@ -416,7 +575,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def agent_end[HandlerT: Callable[..., Any]](
+    def agent_end(
         self,
         *,
         priority: int = 0,
@@ -432,7 +591,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def waiting_llm_request[HandlerT: Callable[..., Any]](
+    def waiting_llm_request(
         self,
         *,
         priority: int = 0,
@@ -448,7 +607,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def plugin_error[HandlerT: Callable[..., Any]](
+    def plugin_error(
         self,
         *,
         priority: int = 0,
@@ -464,7 +623,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def plugin_loaded[HandlerT: Callable[..., Any]](
+    def plugin_loaded(
         self,
         *,
         priority: int = 0,
@@ -480,7 +639,7 @@ class _HooksNamespace:
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
-    def plugin_unloaded[HandlerT: Callable[..., Any]](
+    def plugin_unloaded(
         self,
         *,
         priority: int = 0,
@@ -542,12 +701,24 @@ def discover_handlers(plugin: object) -> tuple[HandlerRegistration, ...]:
             priority=spec.priority,
             path=spec.path,
             aliases=spec.aliases,
+            group=spec.group,
+            group_custom_filters=spec.group_custom_filters,
+            sub_command=spec.sub_command,
             message_types=spec.message_types,
             platforms=spec.platforms,
             roles=spec.roles,
             regex=spec.regex,
             regex_flags=spec.regex_flags,
+            button_action=spec.button_action,
+            button_action_id=spec.button_action_id,
+            ui_action=spec.ui_action,
+            ui_action_id=spec.ui_action_id,
             tool_name=spec.tool_name,
+            resumable=spec.resumable,
+            streaming_input=spec.streaming_input,
+            service_name=spec.service_name,
+            direct=spec.direct,
+            input_schema=spec.input_schema,
         )
         registrations.append(
             HandlerRegistration(

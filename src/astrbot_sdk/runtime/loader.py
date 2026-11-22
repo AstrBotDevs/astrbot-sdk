@@ -20,15 +20,19 @@ from packaging.version import Version
 
 from .._version import __version__
 from ..capabilities import DEFAULT_CAPABILITY_IDS, CapabilityGrant, CapabilitySet
+from ..config import validate_config_against_model
 from ..context import (
+    _ACTIVE_INVOCATION_CTX,
     HostCapabilityInvoker,
     HostCapabilityStreamInvoker,
+    HostServiceInvoker,
     PluginContext,
     PluginInfo,
     RuntimeMode,
 )
 from ..errors import (
     CapabilityDenied,
+    InvalidConfig,
     InvalidHandlerResult,
     InvalidPluginDefinition,
     InvalidRequest,
@@ -337,7 +341,12 @@ class LoadedPlugin:
         except KeyError as exc:
             raise NotFound(f"handler not found: {handler_id}") from exc
 
-    async def invoke_web(self, request: Any) -> AsyncIterator[dict]:
+    async def invoke_web(
+        self,
+        request: Any,
+        *,
+        call_id: str | None = None,
+    ) -> AsyncIterator[dict]:
         """Invoke one web route handler and stream the response.
 
         Yields the response info first, then body chunks, for the Host to
@@ -348,7 +357,7 @@ class LoadedPlugin:
         registration = next(
             (
                 item
-                for item in self.instance.ctx.web.routes
+                for item in self.instance._ctx.web.routes
                 if item.route == request.route
             ),
             None,
@@ -359,13 +368,24 @@ class LoadedPlugin:
             raise InvalidRequest(
                 f"method {request.method} not allowed for {request.route}"
             )
-        facade = WebRequest(request, self.instance.ctx)
-        outcome = registration.handler(facade, **request.path_params)
-        result = await outcome if inspect.isawaitable(outcome) else outcome
-        info, chunks = await normalize_web_result(result)
-        yield {"info": info}
-        async for chunk in chunks:
-            yield {"chunk": chunk}
+        scoped_ctx = (
+            self.instance._ctx.scoped_for_invocation(call_id)
+            if call_id is not None
+            else self.instance._ctx
+        )
+        ctx_token = _ACTIVE_INVOCATION_CTX.set(scoped_ctx)
+        try:
+            facade = WebRequest(request, scoped_ctx)
+            outcome = registration.handler(facade, **request.path_params)
+            result = await outcome if inspect.isawaitable(outcome) else outcome
+            info, chunks = await normalize_web_result(result)
+            yield {"info": info}
+            async for chunk in chunks:
+                yield {"chunk": chunk}
+        finally:
+            if call_id is not None:
+                scoped_ctx._retire()
+            _ACTIVE_INVOCATION_CTX.reset(ctx_token)
 
     async def invoke_views(
         self,
@@ -439,23 +459,149 @@ class LoadedPlugin:
         await self._invoke_lifecycle(HandlerKind.LIFECYCLE_STARTUP)
         self._started = True
 
-    async def reconfigure(self, config: Any) -> None:
-        previous = self.instance.ctx.config
-        self.instance.ctx.config = config
-        await self._invoke_lifecycle(
-            HandlerKind.LIFECYCLE_CONFIG_CHANGED,
-            ConfigChangedEvent(previous=previous, current=config),
+    async def validate_config(self, candidate: Any) -> Any:
+        """Validate candidate config via config_model and validate_config hook."""
+        config_model = getattr(type(self.instance), "config_model", None)
+        validated = (
+            validate_config_against_model(config_model, candidate)
+            if config_model is not None
+            else candidate
         )
+        registration = next(
+            (
+                item
+                for item in self.registrations
+                if item.spec.kind is HandlerKind.LIFECYCLE_VALIDATE_CONFIG
+            ),
+            None,
+        )
+        if registration is not None:
+            try:
+                outcome = registration.handler(validated)
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except InvalidConfig:
+                raise
+            except Exception as exc:
+                raise InvalidConfig(str(exc)) from exc
+        return validated
 
-    async def shutdown(self, *, deadline: datetime | None = None) -> None:
+    async def reconfigure(self, config: Any) -> None:
+        previous = self.instance._ctx.config
+        validated = await self.validate_config(config)
+        self.instance._ctx._update_config(validated)
+        try:
+            await self._invoke_lifecycle(
+                HandlerKind.LIFECYCLE_CONFIG_CHANGED,
+                ConfigChangedEvent(previous=previous, current=validated),
+            )
+        except Exception:
+            self.instance._ctx._update_config(previous)
+            raise
+
+    async def check_health(self) -> None:
+        """Run background TaskGroup health check and optional @lifecycle.health."""
+        self.instance._ctx.tasks.check_health()
+        await self._invoke_lifecycle(HandlerKind.LIFECYCLE_HEALTH)
+
+    async def invoke_service(
+        self,
+        service_name: str,
+        payload: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
+    ) -> Any:
+        """Invoke an exported host-scoped or direct cross-plugin service."""
+        registration = next(
+            (
+                item
+                for item in self.registrations
+                if item.spec.kind in (HandlerKind.SERVICE, HandlerKind.DIRECT_SERVICE)
+                and (
+                    item.spec.service_name == service_name
+                    or item.id == service_name
+                    or item.id == f"service:{service_name}"
+                )
+            ),
+            None,
+        )
+        if registration is None:
+            raise NotFound(f"service not found: {service_name}")
+
+        if registration.spec.kind is HandlerKind.DIRECT_SERVICE:
+            params = list(inspect.signature(registration.handler).parameters.values())
+            dctx = self.instance._ctx.direct_view()
+            outcome = (
+                registration.handler(dict(payload), dctx)
+                if len(params) >= 2
+                else registration.handler(dict(payload))
+            )
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult("direct service handler must be async")
+            return await outcome
+
+        scoped_ctx = (
+            self.instance._ctx.scoped_for_invocation(call_id)
+            if call_id is not None
+            else self.instance._ctx
+        )
+        ctx_token = _ACTIVE_INVOCATION_CTX.set(scoped_ctx)
+        try:
+            outcome = registration.handler(dict(payload))
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult("service handler must be async")
+            return await outcome
+        finally:
+            if call_id is not None:
+                scoped_ctx._retire()
+            _ACTIVE_INVOCATION_CTX.reset(ctx_token)
+
+    async def discover_tools(self) -> list[dict[str, Any]]:
+        """Invoke @on.tool_discovery if registered and return serialized specs."""
+        registration = next(
+            (
+                item
+                for item in self.registrations
+                if item.spec.kind is HandlerKind.LIFECYCLE_TOOL_DISCOVERY
+            ),
+            None,
+        )
+        if registration is None:
+            return []
+        outcome = registration.handler()
+        if not inspect.isawaitable(outcome):
+            raise InvalidHandlerResult("tool_discovery handler must be async")
+        discovered = await outcome
+        return list(discovered or [])
+
+    async def invoke_cron(self, handler_id: str, payload: Any) -> Any:
+        """Invoke one scheduled cron handler registered on PluginContext."""
+        handler = self.instance._ctx.cron_handlers.get(handler_id)
+        if handler is None:
+            raise InvalidRequest(f"unknown cron handler: {handler_id}")
+        args = list(payload.get("args") or ())
+        kwargs = dict(payload.get("kwargs") or {})
+        result = handler(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def shutdown(
+        self,
+        *,
+        deadline: datetime | None = None,
+        reason: str = "shutdown",
+    ) -> None:
         if not self._started:
             return
         try:
+            await self.instance._ctx.tasks.shutdown()
             await self._invoke_lifecycle(
                 HandlerKind.LIFECYCLE_SHUTDOWN,
-                ShutdownEvent(deadline=deadline),
+                ShutdownEvent(deadline=deadline, reason=reason),
             )
         finally:
+            self.instance._ctx._retire()
             self._started = False
 
     async def invoke_tool(
@@ -463,22 +609,11 @@ class LoadedPlugin:
         handler_id: str,
         call: ToolCallContext,
         args: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
     ) -> Any:
-        """Invoke one tool handler and return its JSON-safe result.
-
-        Args:
-            handler_id: Registered tool handler ID.
-            call: Tool call context for injection.
-            args: Tool arguments supplied by the LLM.
-
-        Returns:
-            Handler return value (str, JSON value, or None).
-
-        Raises:
-            InvalidHandlerResult: The handler yields or returns an awaitable
-                instead of a plain value.
-        """
-        handler: Callable[..., Any] | None = self.instance.ctx.dynamic_tools.get(
+        """Invoke one tool handler and return its JSON-safe result."""
+        handler: Callable[..., Any] | None = self.instance._ctx.dynamic_tools.get(
             handler_id,
         )
         if handler is None:
@@ -489,20 +624,25 @@ class LoadedPlugin:
                 )
             handler = registration.handler
 
+        scoped_ctx = (
+            self.instance._ctx.scoped_for_invocation(call_id)
+            if call_id is not None
+            else self.instance._ctx
+        )
         umo = call.umo or (call.event.umo if call.event is not None else None)
-        token = self.instance.ctx._bind_ambient_umo(umo) if umo is not None else None
+        token = scoped_ctx._bind_ambient_umo(umo) if umo is not None else None
         event_token = (
-            self.instance.ctx._bind_ambient_event(call.event)
+            scoped_ctx._bind_ambient_event(call.event)
             if call.event is not None
             else None
         )
+        ctx_token = _ACTIVE_INVOCATION_CTX.set(scoped_ctx)
         try:
             signature = inspect.signature(handler)
             parameters = list(signature.parameters.values())
             kwargs = dict(args)
             if parameters and _is_tool_context_param(parameters[0]):
-                # Attach the live plugin context; it never crosses the protocol.
-                call = dataclasses.replace(call, ctx=self.instance.ctx)
+                call = dataclasses.replace(call, ctx=scoped_ctx)
                 outcome = handler(call, **kwargs)
             else:
                 outcome = handler(**kwargs)
@@ -516,31 +656,23 @@ class LoadedPlugin:
                 )
             return await outcome
         finally:
+            if call_id is not None:
+                scoped_ctx._retire()
+            _ACTIVE_INVOCATION_CTX.reset(ctx_token)
             if token is not None:
-                self.instance.ctx._reset_ambient_umo(token)
+                scoped_ctx._reset_ambient_umo(token)
             if event_token is not None:
-                self.instance.ctx._reset_ambient_event(event_token)
+                scoped_ctx._reset_ambient_event(event_token)
 
     async def invoke_hook(
         self,
         handler_id: str,
         event: MessageEvent | None,
         stage_payload: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
     ) -> dict[str, Any]:
-        """Invoke one Pipeline hook handler.
-
-        The stage DTO is rebuilt as a tracked object; the handler mutates it
-        and optionally returns a Decision. Recorded write operations are
-        returned for the Host to apply.
-
-        Args:
-            handler_id: Registered hook handler ID.
-            event: Triggering event, or None for plugin-initiated calls.
-            stage_payload: Snapshot fields of the stage DTO.
-
-        Returns:
-            Dict with write ops and an optional decision.
-        """
+        """Invoke one Pipeline hook handler."""
         from ..hooks import build_stage_dto
         from ..registration import _HOOK_KINDS
 
@@ -561,22 +693,39 @@ class LoadedPlugin:
         if parameters and dto is not None:
             args.append(dto)
 
-        outcome = registration.handler(*args)
-        if inspect.isasyncgen(outcome):
-            await outcome.aclose()
-            raise InvalidHandlerResult("hook handler cannot yield results")
-        if not inspect.isawaitable(outcome):
-            raise InvalidHandlerResult(
-                f"hook handler {handler_id!r} did not return an awaitable"
-            )
-        result = await outcome
-        if result is not None:
-            raise InvalidHandlerResult(f"hook handler {handler_id!r} must return None")
-        from ..hooks import HookDTO
+        scoped_ctx = (
+            self.instance._ctx.scoped_for_invocation(call_id)
+            if call_id is not None
+            else self.instance._ctx
+        )
+        ctx_token = _ACTIVE_INVOCATION_CTX.set(scoped_ctx)
+        try:
+            outcome = registration.handler(*args)
+            if inspect.isasyncgen(outcome):
+                await outcome.aclose()
+                raise InvalidHandlerResult("hook handler cannot yield results")
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult(
+                    f"hook handler {handler_id!r} did not return an awaitable"
+                )
+            result = await outcome
+            if result is not None:
+                raise InvalidHandlerResult(
+                    f"hook handler {handler_id!r} must return None"
+                )
+            from ..hooks import HookDTO
 
-        return {
-            "writes": dto._write_ops() if isinstance(dto, HookDTO) else [],
-        }
+            return {
+                "writes": (
+                    await dto._prepare_write_ops(scoped_ctx.assets)
+                    if isinstance(dto, HookDTO)
+                    else []
+                ),
+            }
+        finally:
+            if call_id is not None:
+                scoped_ctx._retire()
+            _ACTIVE_INVOCATION_CTX.reset(ctx_token)
 
     async def _prepare_result(self, result: EventResult | None) -> EventResult | None:
         # Upload local media sources so outbound chains only carry asset
@@ -584,7 +733,7 @@ class LoadedPlugin:
         if isinstance(result, MessageResult):
             prepared = await prepare_outbound_chain(
                 result.message,
-                self.instance.ctx.assets,
+                self.instance._ctx.assets,
             )
             if prepared is not result.message:
                 return MessageResult(
@@ -598,6 +747,7 @@ class LoadedPlugin:
         self,
         handler_id: str,
         *args: Any,
+        call_id: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[EventResult | None]:
         registration = self.get_handler(handler_id)
@@ -606,17 +756,21 @@ class LoadedPlugin:
                 "lifecycle handlers cannot be invoked as event handlers"
             )
 
-        # Bind the triggering session so LLM provider selection defaults to
-        # the provider this session selected.
+        scoped_ctx = (
+            self.instance._ctx.scoped_for_invocation(call_id)
+            if call_id is not None
+            else self.instance._ctx
+        )
         event = next(
             (arg for arg in args if isinstance(arg, MessageEvent)),
             None,
         )
         umo = event.umo if event is not None else None
-        token = self.instance.ctx._bind_ambient_umo(umo) if umo is not None else None
+        token = scoped_ctx._bind_ambient_umo(umo) if umo is not None else None
         event_token = (
-            self.instance.ctx._bind_ambient_event(event) if event is not None else None
+            scoped_ctx._bind_ambient_event(event) if event is not None else None
         )
+        ctx_token = _ACTIVE_INVOCATION_CTX.set(scoped_ctx)
         try:
             outcome = registration.handler(*args, **kwargs)
             if inspect.isasyncgen(outcome):
@@ -641,10 +795,13 @@ class LoadedPlugin:
                 )
             yield await self._prepare_result(_normalize_result(await outcome))
         finally:
+            if call_id is not None:
+                scoped_ctx._retire()
+            _ACTIVE_INVOCATION_CTX.reset(ctx_token)
             if token is not None:
-                self.instance.ctx._reset_ambient_umo(token)
+                scoped_ctx._reset_ambient_umo(token)
             if event_token is not None:
-                self.instance.ctx._reset_ambient_event(event_token)
+                scoped_ctx._reset_ambient_event(event_token)
 
 
 def load_plugin(
@@ -656,6 +813,7 @@ def load_plugin(
     logger: logging.Logger | None = None,
     host_capability_invoker: HostCapabilityInvoker | None = None,
     host_capability_stream_invoker: HostCapabilityStreamInvoker | None = None,
+    host_service_invoker: HostServiceInvoker | None = None,
     data_dir: str | Path | None = None,
 ) -> LoadedPlugin:
     root = Path(plugin_root).resolve()
@@ -680,6 +838,13 @@ def load_plugin(
         )
     )
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
+    plugin_class = _resolve_entrypoint(metadata, root)
+    config_model = getattr(plugin_class, "config_model", None)
+    initial_config = (
+        validate_config_against_model(config_model, config)
+        if config_model is not None
+        else config
+    )
     context = PluginContext(
         plugin=PluginInfo(
             id=metadata.plugin_id,
@@ -687,15 +852,15 @@ def load_plugin(
             version=metadata.version,
             runtime_mode=runtime_mode,
         ),
-        config=config,
+        config=initial_config,
         logger=logger or logging.getLogger(f"astrbot.plugin.{metadata.name}"),
         capabilities=grants,
         data_dir=plugin_data_dir,
         _host_capability_invoker=host_capability_invoker,
         _host_capability_stream_invoker=host_capability_stream_invoker,
+        _host_service_invoker=host_service_invoker,
     )
 
-    plugin_class = _resolve_entrypoint(metadata, root)
     try:
         instance = plugin_class(context)
     except TypeError as exc:

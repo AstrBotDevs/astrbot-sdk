@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "example.rust_template",
+  "name": "rust_template",
+  "description": "Starter template for an AstrBot Rust Worker plugin",
+  "version": "0.1.0",
+  "author": "your-name",
+  "command": ["bin/astrbot-plugin-template", "."],
+  "capabilities": {
+    "required": [],
+    "optional": [
+      {"id": "storage.kv"}
+    ]
+  }
+}
