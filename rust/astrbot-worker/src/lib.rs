@@ -1061,26 +1061,53 @@ async fn dispatch_invocation(
 
     let exec_fut: BoxFuture<'static, Result<Value, WorkerError>> = match method.as_str() {
         METHOD_INVOKE | METHOD_RESUMABLE_INVOKE => {
-            let handler_id = params
-                .get("handler_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            if let Some(entry) = worker.handlers.get(&handler_id) {
-                let input = Value::Object(params);
-                (entry.handler)(input, ctx)
-            } else if let Some(dyn_tool) = worker
-                .runtime_tools
-                .get(handler_id.strip_prefix("tool:").unwrap_or(&handler_id))
-            {
-                let args = params.get("args").cloned().unwrap_or(Value::Object(params));
-                dyn_tool(args, ctx)
+            if let Some(views_val) = params.get("views") {
+                let op = views_val
+                    .as_object()
+                    .and_then(|v| v.get("operation"))
+                    .or_else(|| params.get("operation"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("manifest")
+                    .to_owned();
+                if op == "manifest" {
+                    Box::pin(async move {
+                        Ok(json!({
+                            "info": {
+                                "pages": [],
+                                "i18n": {},
+                                "content_type": "application/json"
+                            }
+                        }))
+                    })
+                } else {
+                    Box::pin(async move {
+                        Err(WireError::not_found(format!(
+                            "unsupported views operation: {op}"
+                        )))
+                    })
+                }
             } else {
-                Box::pin(async move {
-                    Err(WireError::not_found(format!(
-                        "unknown handler: {handler_id}"
-                    )))
-                })
+                let handler_id = params
+                    .get("handler_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if let Some(entry) = worker.handlers.get(&handler_id) {
+                    let input = Value::Object(params);
+                    (entry.handler)(input, ctx)
+                } else if let Some(dyn_tool) = worker
+                    .runtime_tools
+                    .get(handler_id.strip_prefix("tool:").unwrap_or(&handler_id))
+                {
+                    let args = params.get("args").cloned().unwrap_or(Value::Object(params));
+                    dyn_tool(args, ctx)
+                } else {
+                    Box::pin(async move {
+                        Err(WireError::not_found(format!(
+                            "unknown handler: {handler_id}"
+                        )))
+                    })
+                }
             }
         }
         METHOD_INVOKE_TOOL => {

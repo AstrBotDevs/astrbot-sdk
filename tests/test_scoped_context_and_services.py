@@ -160,6 +160,7 @@ async def test_scoped_context_retires_and_direct_context_has_no_host(
         ),
         host_capability_invoker=cap_invoker,
         host_service_invoker=service_invoker,
+        data_dir=tmp_path / "data",
     )
     await loaded.start()
     try:
@@ -384,3 +385,145 @@ async def test_uds_credential_validation_and_external_attach(tmp_path: Path) -> 
             await asyncio.gather(runner_task, return_exceptions=True)
             uds_server.close()
             await asyncio.wait_for(uds_server.wait_closed(), timeout=5.0)
+
+
+async def test_task_group_spawn_detaches_call_scope_and_hook_uploads_local_media(
+    tmp_path: Path,
+) -> None:
+    plugin_root = tmp_path / "task_and_hook"
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    img_path = tmp_path / "gal.jpg"
+    img_path.write_bytes(b"\xff\xd8\xff\xe0fakejpeg")
+    (plugin_root / "metadata.yaml").write_text(
+        """
+schema_version: 2
+name: task_and_hook
+desc: Regression test for TaskGroup.spawn detachment and hook media upload
+version: 0.1.0
+author: test
+runtime:
+  api: sdk
+  entrypoint: main:TaskAndHookPlugin
+  sdk_version: ">=0.1.0"
+capabilities:
+  required: []
+  optional:
+    - id: storage.kv
+    - id: assets.transfer
+    - id: message.observe
+""".strip(),
+        encoding="utf-8",
+    )
+    (plugin_root / "main.py").write_text(
+        f"""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from astrbot_sdk import MessageEvent, Plugin, hooks, on
+from astrbot_sdk.hooks import MessageResult
+from astrbot_sdk.message_components import Image
+
+
+class TaskAndHookPlugin(Plugin[dict[str, Any]]):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.bg_done = asyncio.Event()
+        self.bg_value: Any = None
+
+    @on.command("spawn_bg")
+    async def spawn_bg(self, event: MessageEvent):
+        _ = event
+
+        async def _worker() -> None:
+            await asyncio.sleep(0.02)
+            self.bg_value = await self.ctx.storage.get("after_handler")
+            self.bg_done.set()
+
+        self.ctx.tasks.spawn("bg_after_handler", _worker())
+        return "queued"
+
+    @hooks.message_result()
+    async def render_image(
+        self, event: MessageEvent, result: MessageResult
+    ) -> None:
+        _ = event
+        result.chain = [Image.from_file(Path({str(img_path)!r}))]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    from astrbot_sdk.assets import AssetRef
+
+    uploaded_assets: list[dict[str, Any]] = []
+
+    async def cap_invoker(cap: str, op: str, payload: dict[str, Any]) -> Any:
+        if cap == "storage.kv" and op == "get":
+            return {"value": f"detached:{payload['key']}"}
+        if cap == "assets.transfer" and op == "upload":
+            uploaded_assets.append(payload)
+            return {
+                "asset": AssetRef(
+                    id="asset-gal-1",
+                    filename="gal.jpg",
+                    media_type="image/jpeg",
+                    size=12,
+                )
+            }
+        return {}
+
+    loaded = load_plugin(
+        plugin_root,
+        granted_capabilities=CapabilitySet(
+            [
+                CapabilityGrant("storage.kv"),
+                CapabilityGrant("assets.transfer"),
+                CapabilityGrant("message.observe"),
+            ]
+        ),
+        host_capability_invoker=cap_invoker,
+        data_dir=tmp_path / "data",
+    )
+    await loaded.start()
+    try:
+        ev = MessageEvent(
+            id="e-bg",
+            umo=UMO("test", MessageType.PRIVATE, "u1"),
+            platform_type="test",
+            message_ref=MessageRef("m-bg"),
+            message=MessageChain(Plain("spawn_bg")),
+            sender=Sender(id="u1", name="Tester"),
+            timestamp=datetime.now(timezone.utc),
+        )
+        out = [r async for r in loaded.invoke("spawn_bg", ev, call_id="call-bg-1")]
+        assert out[0] is not None
+        await asyncio.wait_for(loaded.instance.bg_done.wait(), timeout=2.0)
+        assert loaded.instance.bg_value == "detached:after_handler"
+
+        hook_out = await loaded.invoke_hook(
+            "render_image", ev, {"chain": []}, call_id="call-hook-1"
+        )
+        assert len(uploaded_assets) == 1
+        assert hook_out["writes"] == [
+            {
+                "field": "chain",
+                "op": "set",
+                "value": [
+                    {
+                        "type": "Image",
+                        "source": {
+                            "kind": "asset",
+                            "id": "asset-gal-1",
+                            "filename": "gal.jpg",
+                            "media_type": "image/jpeg",
+                            "size": 12,
+                        },
+                        "media_type": None,
+                    }
+                ],
+            }
+        ]
+    finally:
+        await loaded.shutdown(reason="test")
