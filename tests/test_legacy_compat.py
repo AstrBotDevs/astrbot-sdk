@@ -611,7 +611,7 @@ async def test_legacy_platform_event_shims() -> None:
         context,
     )
     result = await bot_event.bot.get_group_member_list(group_id="group-1")
-    assert result == {"result": {"member_count": 1}}
+    assert result == {"member_count": 1}
     invoke.assert_awaited_once_with(
         "platform.raw",
         "call_action",
@@ -739,14 +739,25 @@ def test_compat_event_extras_plugins_name_and_created_at() -> None:
     assert empty.plugins_name is None
 
 
-def test_compat_event_platform_facades_resolve_from_snapshot() -> None:
+@pytest.mark.asyncio
+async def test_compat_event_platform_facades_resolve_from_snapshot() -> None:
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
+    from astrbot_sdk.compat.v1.components import MessageChain, Plain
+    from astrbot_sdk.compat.v1.event import MessageType, PlatformStatus
     from astrbot_sdk.compat.v1.host_snapshot import PlatformFacade
+    from astrbot_sdk.compat.v1.star import MessageSesion
 
+    send_message = AsyncMock(return_value=True)
     target = PlatformFacade(
-        SimpleNamespace(),
-        {"id": "plat-1", "name": "aiocqhttp", "config": {"appid": "123"}},
+        SimpleNamespace(send_message=send_message),
+        {
+            "id": "plat-1",
+            "name": "aiocqhttp",
+            "status": "running",
+            "config": {"appid": "123"},
+        },
     )
     other = PlatformFacade(SimpleNamespace(), {"id": "plat-2", "name": "webchat"})
     context = SimpleNamespace(
@@ -756,8 +767,18 @@ def test_compat_event_platform_facades_resolve_from_snapshot() -> None:
 
     assert facade.platform is target
     assert facade.platform.config == {"appid": "123"}
+    assert facade.platform.status == PlatformStatus.RUNNING
+    assert other.status == PlatformStatus.RUNNING
+    assert target.errors == []
+    assert target.last_error is None
     assert facade.platform_meta.id == "plat-1"
     assert facade.platform_meta.name == "aiocqhttp"
+
+    session = MessageSesion("plat-1", MessageType.FRIEND_MESSAGE, "user-1")
+    assert str(session) == "plat-1:FriendMessage:user-1"
+    chain = MessageChain([Plain("hi")])
+    await target.send_by_session(session, chain)
+    send_message.assert_awaited_once_with(session, chain)
 
     missing = _make_facade(SimpleNamespace(platform_manager=None))
     assert missing.platform is None
