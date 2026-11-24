@@ -306,7 +306,6 @@ def encode_message_event(event: MessageEvent) -> dict[str, JSONValue]:
         "timestamp": event.timestamp.isoformat(),
         "command": command,
         "is_wake": event.is_wake,
-        "extras": encode_value(dict(event.extras)),
     }
 
 
@@ -363,7 +362,6 @@ def decode_message_event(data: Mapping[str, Any]) -> MessageEvent:
             timestamp=datetime.fromisoformat(str(data["timestamp"])),
             command=command,
             is_wake=bool(data.get("is_wake", False)),
-            extras=dict(decode_value(data.get("extras", {}))),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidRequest("invalid MessageEvent payload") from exc

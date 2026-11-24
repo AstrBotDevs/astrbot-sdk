@@ -80,7 +80,7 @@ class AgentRequest:
     ``agent`` is reserved for custom agent runners: None selects the built-in
     tool-loop agent. ``steps`` on AgentResponse is likewise reserved.
 
-    ``tools`` follows the legacy tool_loop_agent semantics: None offers no
+    ``tools`` selects the tools by name: None offers no
     tools, while a name tuple offers exactly those tools. ``event`` carries
     the triggering event and defaults to the ambient one.
     """

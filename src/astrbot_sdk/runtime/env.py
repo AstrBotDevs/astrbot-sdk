@@ -49,7 +49,7 @@ def runner_env(
 
     Args:
         extra: Explicit additions and overrides applied last (e.g.
-            ASTRBOT_DATA_PATH). May intentionally add anything; only the
+            ASTRBOT_SDK_DATA_DIR). May intentionally add anything; only the
             inherited part is restricted.
         base: Environment to filter; defaults to os.environ (injectable
             for tests).

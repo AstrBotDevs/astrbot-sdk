@@ -41,10 +41,10 @@ def test_runner_env_filters_and_overrides() -> None:
     assert "PYTHONPATH" not in env
 
     overridden = runner_env(
-        {"ASTRBOT_DATA_PATH": "/data", "PATH": "/custom"},
+        {"ASTRBOT_SDK_DATA_DIR": "/data", "PATH": "/custom"},
         base=base,
     )
-    assert overridden["ASTRBOT_DATA_PATH"] == "/data"
+    assert overridden["ASTRBOT_SDK_DATA_DIR"] == "/data"
     assert overridden["PATH"] == "/custom"
 
 

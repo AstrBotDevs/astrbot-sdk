@@ -7,12 +7,9 @@ import yaml
 
 from astrbot_sdk.errors import (
     InvalidPluginMetadata,
-    LegacyPluginMetadata,
     UnsupportedMetadataVersion,
 )
 from astrbot_sdk.runtime.metadata import (
-    PluginAPIFamily,
-    detect_api_family,
     load_metadata,
     parse_metadata,
 )
@@ -42,46 +39,26 @@ def sdk_metadata() -> dict:
     }
 
 
-def test_detects_unversioned_metadata_as_legacy() -> None:
-    assert (
-        detect_api_family(
-            {
-                "name": "legacy",
-                "desc": "Legacy plugin",
-                "author": "AstrBot",
-                "version": "1.0.0",
-            }
-        )
-        is PluginAPIFamily.LEGACY
-    )
-
-
-def test_parse_metadata_rejects_legacy_metadata() -> None:
-    with pytest.raises(LegacyPluginMetadata):
-        parse_metadata(
-            {
-                "name": "legacy",
-                "desc": "Legacy plugin",
-                "author": "AstrBot",
-                "version": "1.0.0",
-            }
-        )
-
-
-def test_partial_v2_metadata_does_not_fall_back_to_legacy() -> None:
+@pytest.mark.parametrize("has_runtime", [False, True])
+def test_metadata_requires_schema_version(has_runtime: bool) -> None:
+    data = sdk_metadata()
+    del data["schema_version"]
+    if not has_runtime:
+        del data["runtime"]
+        del data["capabilities"]
     with pytest.raises(InvalidPluginMetadata, match="schema_version"):
-        detect_api_family({"runtime": {"api": "sdk"}})
+        parse_metadata(data)
 
 
 def test_unsupported_schema_is_rejected() -> None:
     with pytest.raises(UnsupportedMetadataVersion):
-        detect_api_family({"schema_version": 3})
+        parse_metadata({"schema_version": 3})
 
 
 @pytest.mark.parametrize("schema_version", [True, 2.0, "2"])
 def test_schema_version_must_be_integer_two(schema_version: object) -> None:
     with pytest.raises(UnsupportedMetadataVersion):
-        detect_api_family({"schema_version": schema_version})
+        parse_metadata({"schema_version": schema_version})
 
 
 def test_parse_metadata_v2() -> None:

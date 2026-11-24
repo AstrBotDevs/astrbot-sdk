@@ -36,11 +36,11 @@ capabilities:
 
 | 条件 | 加载方式 |
 | --- | --- |
-| 没有 `schema_version` | 旧版插件 |
+| 没有 `schema_version` | SDK Runner 拒绝加载 |
 | `schema_version: 2` 且 `runtime.api: sdk` | 新版 SDK 插件 |
 | 只有其中一项，或值不受支持 | 拒绝加载 |
 
-插件类型只由 `metadata.yaml` 决定。Loader 不扫描 Python 导入、基类或装饰器来猜测类型，也不会在新版加载失败后回退到旧版。
+SDK 插件的入口只由 `metadata.yaml` 决定。Loader 不扫描 Python 导入、基类或装饰器来猜测类型。
 
 `schema_version` 只表示 `metadata.yaml` 的结构版本，不是插件版本、SDK 版本或 RPC 协议版本。
 

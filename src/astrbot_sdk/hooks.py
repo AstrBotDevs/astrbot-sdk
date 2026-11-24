@@ -102,7 +102,7 @@ class TrackedList(list):
 class HookDTO:
     """Mutable hook-stage DTO recording field writes.
 
-    Plugins mutate fields directly, mirroring the legacy in-place hook style.
+    Plugins mutate fields directly.
     The Runner forwards recorded operations to the Host after the handler
     returns. Undeclared fields fail fast with AttributeError.
     """

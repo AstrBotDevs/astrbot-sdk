@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from astrbot_sdk.runtime import StdioPluginClient
 from tests.test_stdio_transport import write_plugin
@@ -16,14 +15,6 @@ from astrbot_sdk import Plugin
 
 
 class TestPlugin(Plugin):
-    pass
-"""
-
-LEGACY_PLUGIN = """
-from astrbot.api.star import Context, Star
-
-
-class LegacyViewsPlugin(Star):
     pass
 """
 
@@ -40,22 +31,6 @@ def add_views(plugin_root: Path) -> None:
     (i18n_dir / "zh-CN.json").write_text(
         '{"metadata": {"display_name": "演示"}}', "utf-8"
     )
-
-
-def write_legacy_plugin(plugin_root: Path) -> None:
-    plugin_root.mkdir()
-    (plugin_root / "metadata.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "name": "legacy_views",
-                "desc": "views test",
-                "author": "AstrBot",
-                "version": "1.0.0",
-            },
-        ),
-        encoding="utf-8",
-    )
-    (plugin_root / "main.py").write_text(LEGACY_PLUGIN, encoding="utf-8")
 
 
 async def _check_views(client: StdioPluginClient) -> None:
@@ -89,24 +64,6 @@ async def test_views_sdk_plugin(tmp_path: Path) -> None:
     add_views(plugin_root)
 
     client = StdioPluginClient(plugin_root, python_executable=Path(sys.executable))
-    try:
-        await client.start()
-        await _check_views(client)
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
-async def test_views_legacy_plugin(tmp_path: Path) -> None:
-    plugin_root = tmp_path / "legacy_views"
-    write_legacy_plugin(plugin_root)
-    add_views(plugin_root)
-
-    client = StdioPluginClient(
-        plugin_root,
-        python_executable=Path(sys.executable),
-        legacy=True,
-    )
     try:
         await client.start()
         await _check_views(client)

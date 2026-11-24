@@ -48,7 +48,7 @@ implemented by a future non-Python SDK (`runtime.language`).
 ## Runner CLI
 
 ```
-python -m astrbot_sdk.runtime --ws ws://core:6195 --plugin-root . [--legacy]
+python -m astrbot_sdk.runtime --ws ws://core:6195 --plugin-root .
 ASTRBOT_RUNNER_TOKEN=<token>  # env, never argv (keeps it out of ps)
 ```
 
@@ -68,7 +68,6 @@ never in plugin metadata):
       "name": "astrbot_plugin_foo",
       "plugin_id": "author/foo",
       "token": "...",
-      "legacy": false,
       "capabilities": ["storage.kv", "message.send"],
       "config": {}
     }
@@ -78,8 +77,7 @@ never in plugin metadata):
 
 - `plugin_id` is validated against the handshake; a token cannot be used to
   mount a different plugin.
-- `capabilities` is the host-side allowlist granted at initialize (legacy
-  plugins use the built-in legacy grant set instead).
+- `capabilities` is the host-side allowlist granted at initialize.
 - Lifecycle mirrors the process supervisor: unexpected disconnect marks the
   plugin down and the bridge waits for a redial with backoff/circuit
   breaking; a deliberate stop closes the socket without waiting.

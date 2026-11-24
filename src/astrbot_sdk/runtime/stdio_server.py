@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import logging
 import os
 import sys
 import uuid
@@ -150,23 +149,6 @@ def _command_params_schema(registration: Any) -> list[dict[str, Any]]:
     return schema
 
 
-def _legacy_data_dir(metadata: Any) -> Path:
-    """Resolve the legacy plugin data directory shared with in-process mode.
-
-    Legacy plugins keep their files under the AstrBot data directory at
-    plugin_data/{name}; when the Host exports ASTRBOT_DATA_PATH the isolated
-    Runner must use the same location so switching runtimes keeps the data.
-    """
-    from .loader import _default_data_dir
-
-    base = os.environ.get("ASTRBOT_DATA_PATH")
-    if not base:
-        return _default_data_dir(metadata)
-    data_dir = Path(base) / "plugin_data" / metadata.name
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
-
-
 class StdioPluginServer:
     """Serve one SDK plugin over newline-delimited stdio frames."""
 
@@ -176,7 +158,6 @@ class StdioPluginServer:
         *,
         reader: BinaryIO | None = None,
         writer: BinaryIO | None = None,
-        legacy: bool = False,
         transport: FrameTransport | None = None,
     ) -> None:
         """Initialize the Runner server.
@@ -185,12 +166,10 @@ class StdioPluginServer:
             plugin_root: Plugin repository root.
             reader: Binary input stream. Defaults to process stdin.
             writer: Binary output stream. Defaults to process stdout.
-            legacy: Load the plugin through the legacy compat layer.
             transport: Frame transport override (e.g. WebSocket). Defaults to
                 a stdio transport over reader/writer.
         """
         self.plugin_root = plugin_root.resolve()
-        self.legacy = legacy
         if transport is None and writer is None:
             # stdio carries protocol frames; a plugin (or a subprocess it
             # spawns) writing to stdout would corrupt framing. Keep a private
@@ -348,20 +327,6 @@ class StdioPluginServer:
                 payload,
             )
             return encode_value(result)
-        if frame.method == "invoke_cron":
-            if self.loaded_plugin is None:
-                raise InvalidRequest("Runner is not initialized")
-            invoker = getattr(self.loaded_plugin, "invoke_cron", None)
-            if invoker is None:
-                raise InvalidRequest("plugin does not support cron handlers")
-            payload = decode_value(frame.params.get("payload", {}))
-            if not isinstance(payload, Mapping):
-                raise InvalidRequest("cron payload must be an object")
-            result = await invoker(
-                str(frame.params["handler_id"]),
-                payload,
-            )
-            return encode_value(result)
         if frame.method == "session_consider":
             event = decode_value(frame.params.get("event"))
             if not isinstance(event, MessageEvent):
@@ -391,13 +356,7 @@ class StdioPluginServer:
         loaded = self.loaded_plugin
         if loaded is None:
             raise InvalidRequest("Runner is not initialized")
-        ctx = getattr(getattr(loaded, "instance", None), "ctx", None)
-        if ctx is None:
-            ctx = getattr(loaded, "sdk_ctx", None)
-        sessions = getattr(ctx, "sessions", None)
-        if sessions is None:
-            raise InvalidRequest("plugin context has no session service")
-        return sessions
+        return loaded.instance.ctx.sessions
 
     async def _initialize(self, frame: RequestFrame) -> dict[str, Any]:
         """Load and start the plugin after protocol negotiation.
@@ -432,23 +391,13 @@ class StdioPluginServer:
                 grants.append(CapabilityGrant(id=str(item["id"]), scope=scope))
 
             config = decode_value(frame.params.get("config"))
-            host_info = decode_value(frame.params.get("host") or {})
-            if not isinstance(host_info, Mapping):
-                host_info = {}
-            if self.legacy:
-                loaded = self._load_legacy(
-                    config,
-                    CapabilitySet(grants),
-                    host_info=host_info,
-                )
-            else:
-                loaded = load_plugin(
-                    self.plugin_root,
-                    config=config,
-                    granted_capabilities=CapabilitySet(grants),
-                    host_capability_invoker=self._invoke_host_capability,
-                    host_capability_stream_invoker=self._invoke_host_capability_stream,
-                )
+            loaded = load_plugin(
+                self.plugin_root,
+                config=config,
+                granted_capabilities=CapabilitySet(grants),
+                host_capability_invoker=self._invoke_host_capability,
+                host_capability_stream_invoker=self._invoke_host_capability_stream,
+            )
             await loaded.start()
             self.loaded_plugin = loaded
 
@@ -459,7 +408,6 @@ class StdioPluginServer:
                 if spec.kind is HandlerKind.COMMAND:
                     details = {
                         "path": spec.path,
-                        "group": spec.group,
                         "aliases": list(spec.aliases),
                         "message_types": [
                             message_type.value for message_type in spec.message_types
@@ -473,17 +421,10 @@ class StdioPluginServer:
                         "stage": spec.kind.value.removeprefix("hook."),
                     }
                 elif spec.kind is HandlerKind.TOOL:
-                    precomputed = getattr(
-                        registration.handler,
-                        "__tool_params__",
-                        None,
-                    )
                     details = {
                         "name": spec.tool_name,
                         "description": spec.description,
-                        "params": precomputed
-                        if precomputed is not None
-                        else [
+                        "params": [
                             {
                                 "name": param.name,
                                 "type": param.type,
@@ -516,12 +457,7 @@ class StdioPluginServer:
                     }
                 )
 
-            # Resolve the SDK context: legacy loaded plugins expose it as
-            # sdk_ctx (their Star instance may carry an unrelated own "ctx"
-            # attribute), new-style plugins as instance.ctx.
-            handshake_ctx = getattr(loaded, "sdk_ctx", None)
-            if handshake_ctx is None:
-                handshake_ctx = getattr(loaded.instance, "ctx", None)
+            handshake_ctx = loaded.instance.ctx
             return {
                 "protocol_version": PROTOCOL_VERSION,
                 "plugin": {
@@ -538,49 +474,11 @@ class StdioPluginServer:
                         "description": route.description,
                     }
                     for route in handshake_ctx.web.routes
-                ]
-                if getattr(handshake_ctx, "web", None) is not None
-                else [],
+                ],
                 "capabilities": list(handshake_ctx.capabilities),
             }
         finally:
             self._initializing = False
-
-    def _load_legacy(
-        self,
-        config: Any,
-        grants: CapabilitySet,
-        *,
-        host_info: Mapping[str, Any] | None = None,
-    ) -> Any:
-        """Load a legacy plugin through the compat layer."""
-        from ..compat.v1.loader import load_legacy_plugin
-        from ..context import PluginContext, PluginInfo, RuntimeMode
-        from .loader import _load_metadata_for_legacy
-
-        metadata = _load_metadata_for_legacy(self.plugin_root)
-        data_dir = _legacy_data_dir(metadata)
-        ctx = PluginContext(
-            plugin=PluginInfo(
-                id=metadata.plugin_id,
-                name=metadata.name,
-                version=metadata.version,
-                runtime_mode=RuntimeMode.ISOLATED,
-            ),
-            config=config,
-            logger=logging.getLogger(f"astrbot.plugin.{metadata.name}"),
-            capabilities=grants,
-            data_dir=data_dir,
-            _host_capability_invoker=self._invoke_host_capability,
-            _host_capability_stream_invoker=self._invoke_host_capability_stream,
-        )
-        return load_legacy_plugin(
-            self.plugin_root,
-            ctx=ctx,
-            config=config,
-            logger=logging.getLogger(f"astrbot.plugin.{metadata.name}"),
-            host_info=host_info,
-        )
 
     async def _invoke_host_capability(
         self,
@@ -810,11 +708,10 @@ class StdioPluginServer:
             self.loaded_plugin = None
 
 
-async def serve_stdio_plugin(plugin_root: Path, *, legacy: bool = False) -> None:
+async def serve_stdio_plugin(plugin_root: Path) -> None:
     """Run one plugin Runner on process stdio.
 
     Args:
         plugin_root: Plugin repository root.
-        legacy: Load the plugin through the legacy compat layer.
     """
-    await StdioPluginServer(plugin_root, legacy=legacy).serve()
+    await StdioPluginServer(plugin_root).serve()

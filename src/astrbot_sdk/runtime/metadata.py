@@ -7,25 +7,19 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from ..errors import (
     InvalidPluginMetadata,
-    LegacyPluginMetadata,
     UnsupportedMetadataVersion,
 )
 
 METADATA_FILENAMES = ("metadata.yaml", "metadata.yml")
 _REQUIRED_STRING_FIELDS = ("name", "desc", "version", "author")
 _CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$")
-
-
-class PluginAPIFamily(StrEnum):
-    LEGACY = "legacy"
-    SDK = "sdk"
 
 
 class PluginLanguage(StrEnum):
@@ -44,7 +38,7 @@ class PluginLanguage(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeMetadata:
-    api: PluginAPIFamily
+    api: Literal["sdk"]
     entrypoint: str
     module: str
     plugin_class: str
@@ -130,28 +124,6 @@ def read_metadata(plugin_root: str | Path) -> Mapping[str, Any]:
     return data
 
 
-def detect_api_family(data: Mapping[str, Any]) -> PluginAPIFamily:
-    schema_version = data.get("schema_version")
-    has_runtime = "runtime" in data
-    has_capabilities = "capabilities" in data
-
-    if schema_version is None:
-        if has_runtime or has_capabilities:
-            raise InvalidPluginMetadata(
-                "schema_version is required when runtime or capabilities is present"
-            )
-        return PluginAPIFamily.LEGACY
-    if type(schema_version) is not int or schema_version != 2:
-        raise UnsupportedMetadataVersion(
-            f"unsupported metadata schema_version: {schema_version!r}"
-        )
-
-    runtime = data.get("runtime")
-    if not isinstance(runtime, Mapping) or runtime.get("api") != "sdk":
-        raise InvalidPluginMetadata("metadata v2 requires runtime.api to be 'sdk'")
-    return PluginAPIFamily.SDK
-
-
 def _required_string(data: Mapping[str, Any], field_name: str) -> str:
     value = data.get(field_name)
     if not isinstance(value, str) or not value.strip():
@@ -186,6 +158,9 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
     runtime = data.get("runtime")
     if not isinstance(runtime, Mapping):
         raise InvalidPluginMetadata("runtime must be a mapping")
+
+    if runtime.get("api") != "sdk":
+        raise InvalidPluginMetadata("metadata v2 requires runtime.api to be 'sdk'")
 
     unknown = set(runtime) - {"api", "entrypoint", "sdk_version", "language"}
     if unknown:
@@ -222,7 +197,7 @@ def _parse_runtime(data: Mapping[str, Any]) -> RuntimeMetadata:
         "runtime.sdk_version",
     )
     return RuntimeMetadata(
-        api=PluginAPIFamily.SDK,
+        api="sdk",
         entrypoint=entrypoint,
         module=module,
         plugin_class=plugin_class,
@@ -287,9 +262,13 @@ def _parse_capabilities(data: Mapping[str, Any]) -> CapabilityDeclarations:
 
 
 def parse_metadata(data: Mapping[str, Any]) -> PluginMetadata:
-    family = detect_api_family(data)
-    if family is PluginAPIFamily.LEGACY:
-        raise LegacyPluginMetadata("metadata belongs to a legacy plugin")
+    if "schema_version" not in data:
+        raise InvalidPluginMetadata("schema_version is required")
+    schema_version = data["schema_version"]
+    if type(schema_version) is not int or schema_version != 2:
+        raise UnsupportedMetadataVersion(
+            f"unsupported metadata schema_version: {schema_version!r}"
+        )
 
     normalized = dict(data)
     if "desc" not in normalized and "description" in normalized:

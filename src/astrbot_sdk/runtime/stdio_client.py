@@ -100,7 +100,6 @@ class StdioPluginClient:
         timeout: float = 10.0,
         logger: logging.Logger | None = None,
         capability_handler: HostCapabilityHandler | None = None,
-        legacy: bool = False,
         env: Mapping[str, str] | None = None,
         start_timeout: float | None = None,
     ) -> None:
@@ -113,13 +112,11 @@ class StdioPluginClient:
             timeout: Request and process shutdown timeout in seconds.
             logger: Logger used for Runner stderr.
             capability_handler: Dispatcher for authorized Runner-to-Host calls.
-            legacy: Load the plugin through the legacy compat layer.
             env: Extra environment variables merged over the parent env.
             start_timeout: Timeout for the initialize handshake; defaults to
                 timeout. Heavy plugins may need a larger value.
         """
         self.plugin_root = plugin_root.resolve() if plugin_root is not None else None
-        self.legacy = legacy
         self._extra_env = dict(env or {})
         self.start_timeout = start_timeout if start_timeout is not None else timeout
         self.python_executable = str(python_executable or sys.executable)
@@ -148,15 +145,12 @@ class StdioPluginClient:
         *,
         config: Any = None,
         granted_capabilities: CapabilitySet | None = None,
-        host_info: Mapping[str, Any] | None = None,
     ) -> PluginHandshake:
         """Start the Runner and negotiate protocol and plugin metadata.
 
         Args:
             config: Validated plugin configuration.
             granted_capabilities: Capabilities granted by the user.
-            host_info: Optional Host metadata (e.g. the AstrBot version)
-                forwarded to the Runner during initialization.
 
         Returns:
             Negotiated plugin handshake.
@@ -192,7 +186,6 @@ class StdioPluginClient:
                     {
                         "protocol_versions": [PROTOCOL_VERSION],
                         "config": encode_value(config),
-                        "host": encode_value(dict(host_info or {})),
                         "capabilities": [
                             {
                                 "id": grant.id,
@@ -234,13 +227,8 @@ class StdioPluginClient:
         """Resolve the effective capability grants for this Runner.
 
         Local runners are intersected with the plugin's declared
-        capabilities from its on-disk metadata; legacy runners declare
-        nothing, so the Host grants apply directly.
+        capabilities from their on-disk metadata.
         """
-        if self.legacy:
-            # Legacy plugins declare no capabilities; the compat facade is
-            # constrained by whatever the Host grants directly.
-            return granted_capabilities or CapabilitySet()
         if self.plugin_root is None:
             raise InvalidRequest("local runners require a plugin root")
         declared_capabilities = load_metadata(
@@ -267,8 +255,6 @@ class StdioPluginClient:
             "--plugin-root",
             str(self.plugin_root),
         ]
-        if self.legacy:
-            argv.append("--legacy")
         self._process = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -525,25 +511,6 @@ class StdioPluginClient:
         )
         return decode_value(result)
 
-    async def invoke_cron(self, handler_id: str, payload: Mapping[str, Any]) -> Any:
-        """Invoke one remote cron job handler and return its result.
-
-        Args:
-            handler_id: Registered cron handler ID.
-            payload: Job payload forwarded to the plugin handler.
-
-        Returns:
-            Decoded handler result.
-        """
-        result = await self._request(
-            "invoke_cron",
-            {
-                "handler_id": handler_id,
-                "payload": encode_value(dict(payload)),
-            },
-        )
-        return decode_value(result)
-
     async def ping(self) -> Any:
         """Probe Runner liveness; returns its protocol version payload."""
         return await self._request("ping", {})
@@ -785,6 +752,7 @@ class StdioPluginClient:
             or not isinstance(version, str)
             or not version
             or type(schema_version) is not int
+            or schema_version != 2
             or not all(isinstance(item, str) for item in raw_capabilities)
         ):
             raise InvalidRequest("initialize plugin metadata is invalid")

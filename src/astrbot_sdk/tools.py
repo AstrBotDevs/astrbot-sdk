@@ -66,9 +66,7 @@ class Tool:
     Subclasses declare ``name``/``description`` (and optionally ``params``)
     as class attributes and implement ``call``. The instance stays inside the
     plugin process; only the definition crosses to the Host. ``params`` is
-    derived from the call() type annotations when omitted. The legacy ``run``
-    method name is intentionally not supported here; the legacy compatibility
-    layer handles it.
+    derived from the call() type annotations when omitted.
     """
 
     name: ClassVar[str]

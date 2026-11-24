@@ -40,12 +40,5 @@ The current minimum implementation includes:
   plugins into the real Pipeline with command matching, typed arguments,
   yield/ack semantics, and Host capability dispatch.
 
-- a legacy compatibility layer (`astrbot_sdk.compat.v1`): unmodified legacy
-  plugins (Star, filter.command/regex/event_message_type, plain_result/
-  chain_result, Context KV/send/config) run isolated via the astrbot.api
-  import facade and the --legacy Runner mode; isolated legacy is opt-in via
-  `runtime.isolated` in metadata.yaml.
-
-WebSocket transport is not implemented yet. Legacy Provider/hook/tool facades
-(`astrbot.api.provider`, `astrbot.api.all`, `register`, native actions,
-session_waiter) are not covered by the compat layer yet.
+The Runner supports local stdio and external WebSocket connections. SDK plugins
+use metadata schema v2 and a `Plugin` entry point.

@@ -240,7 +240,7 @@ def json_response(
     status_code: int = 200,
     headers: Mapping[str, str] | None = None,
 ) -> WebResponse:
-    """Build a JSON response (mirrors astrbot.api.web.json_response)."""
+    """Build a JSON response."""
     return WebResponse.json(
         {} if data is None else data,
         status=status_code,

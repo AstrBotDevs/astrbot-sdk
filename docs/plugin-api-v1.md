@@ -14,30 +14,14 @@
 - 保留已经清晰且使用广泛的概念：异步方法、类型化指令参数、`yield`、`MessageChain`、`Plain`、`At`、`Reply`、`Record` 等消息段。
 - 改掉旧接口中的结构性问题：空函数式 command group、堆叠装饰器、可变 event、全局 manager 和平台对象透传。
 - 简单插件保持短小；只有使用 Host 能力时才接触 `ctx` 和 capability。
-- 同一份插件代码在 stdio、WebSocket 和进程内适配器下保持相同语义。
+- 同一份插件代码在 stdio 和 WebSocket 下保持相同语义。
 
-保留熟悉的名称不等于运行旧版兼容层。`astrbot_sdk` 中的类型都属于新版 API，并转换为新版注册描述和 RPC DTO。
+## 加载入口
 
-## API Family 与混用
+SDK 插件使用 `metadata.yaml` v2 和 `runtime.entrypoint` 指定 `Plugin`
+子类。SDK 的公开类型和装饰器由 `astrbot_sdk` 提供。
 
-`metadata.yaml` 必须选择旧版或新版 SDK schema。Runner 只启用对应的加载器和注册表。
-
-允许：
-
-- 同一个 AstrBot 实例同时运行旧版和新版插件。
-- 一个插件仓库在迁移期间保存旧版和新版源码，但一次加载只能选择一个入口。
-- 新版 API 保留 `yield`、`MessageChain` 和现有消息段名称。
-
-不允许：
-
-- 新版插件导入 `astrbot.api.*`、继承 `Star` 或接收旧版 `Context`、`AstrMessageEvent`。
-- 旧版插件在同一次加载中注册 `astrbot_sdk` handler。
-- 同一个方法同时使用旧版和新版装饰器。
-- 在新版 handler 中传入旧版消息段、Result、Provider、Manager 或平台对象。
-
-Runner 发现两套注册表都产生当前插件的注册项时，必须拒绝加载并返回 `MIXED_PLUGIN_API`。不能根据导入扫描决定插件类型；`metadata.yaml` 是唯一判据。
-
-第一阶段不在 `astrbot_sdk` 中提供 `filter`、`Star`、`AstrMessageEvent`、`plain_result` 等旧名 alias。否则新版会长期保留两套写法，同名方法也容易被误解为仍有旧版的可变对象语义。需要原样运行旧源码时使用 legacy 模式；迁移为新版时使用下文的明确映射。
+第一阶段不在 `astrbot_sdk` 中提供 `filter`、`Star`、`AstrMessageEvent`、`plain_result` 等旧名 alias。否则新版会长期保留两套写法，同名方法也容易被误解为仍有旧版的可变对象语义。迁移旧插件时使用下文的映射。
 
 ## 最小插件
 
@@ -435,7 +419,6 @@ class UMO:
 - UMO 可以序列化和持久化，用于主动发送、对话和 Persona 服务。
 - 插件可以构造 UMO，Host 在每次调用时校验目标、capability 和 scope。
 - stdio 和 WebSocket 中使用结构化对象传输，不拼接为协议字符串。
-- 旧版 `unified_msg_origin` 字符串由兼容层负责转换。
 
 UMO 只定位消息会话，不代表 AstrBot 的 LLM Conversation。
 
@@ -667,7 +650,7 @@ SDK 公共错误：
 | `DeadlineExceeded` | Host 调用超时 |
 | `HostUnavailable` | transport 断开或 Host 不可用 |
 
-Host 错误通过 stdio、WebSocket 和进程内适配器映射为相同的 SDK 异常。
+Host 错误通过 stdio 和 WebSocket 映射为相同的 SDK 异常。
 
 取消使用 Python `asyncio.CancelledError`，SDK 不包装该异常。插件捕获后必须重新抛出。SDK 不自动重试发送消息、写数据等有副作用的操作。
 
@@ -698,7 +681,7 @@ Host 错误通过 stdio、WebSocket 和进程内适配器映射为相同的 SDK 
 | `event.send(...)` | `ctx.messages.send(event.umo, ...)` |
 | Host manager、Provider、Platform 对象 | 对应的类型化 `ctx.*` 服务 |
 
-这张表描述源码迁移，不表示两套接口可以在同一个插件中混用。旧插件不迁移时继续由旧版兼容层运行。
+这张表描述源码迁移，不表示两套接口可以在同一个插件中混用。旧插件继续由 AstrBot 自己的进程内加载器运行。
 
 ## 第一阶段不提供
 

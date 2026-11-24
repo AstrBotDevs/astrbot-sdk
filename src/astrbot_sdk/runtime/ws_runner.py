@@ -23,7 +23,6 @@ async def serve_ws_plugin(
     url: str,
     *,
     token: str | None = None,
-    legacy: bool = False,
 ) -> None:
     """Run one plugin Runner over a WebSocket connection to the Host.
 
@@ -31,7 +30,6 @@ async def serve_ws_plugin(
         plugin_root: Plugin repository root.
         url: Host listener URL (``ws://`` or ``wss://``).
         token: Bearer token authenticating this plugin during the upgrade.
-        legacy: Load the plugin through the legacy compat layer.
 
     Raises:
         websockets.exceptions.InvalidStatus: The listener rejects the
@@ -50,7 +48,6 @@ async def serve_ws_plugin(
     ) as connection:
         server = StdioPluginServer(
             plugin_root,
-            legacy=legacy,
             transport=WebSocketTransport(connection),
         )
         await server.serve()

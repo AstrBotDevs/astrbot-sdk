@@ -2,7 +2,7 @@
 
 状态：草案。
 
-本文定义新版插件第一阶段可申请的 capability，以及 `PluginContext`（下文简称 `ctx`）公开的接口边界。旧版插件兼容层不受本文的接口形状约束。
+本文定义新版插件第一阶段可申请的 capability，以及 `PluginContext`（下文简称 `ctx`）公开的接口边界。
 
 ## 市场使用情况
 
@@ -117,7 +117,7 @@ Capability 是用户授权和 Host 鉴权的单位，不与 Python 方法一一�
 
 注册 hook 需要对应域的 `.observe`。应用 hook 的修改或 Decision 需要对应域的 `.modify`；`.modify` 隐含对应域的 `.observe`。
 
-hook 收到的是 Runner 本地可写 DTO，不是 Host 内部可变对象。插件直接修改字段，SDK 把记录到的写操作转换为类型化修改请求，由 Host 校验授权后应用。未授予 `modify` 时，写操作在 Runner 本地生效但不转发，不影响 Pipeline。进程内适配器也必须保持这一约束。
+hook 收到的是 Runner 本地可写 DTO，不是 Host 内部可变对象。插件直接修改字段，SDK 把记录到的写操作转换为类型化修改请求，由 Host 校验授权后应用。未授予 `modify` 时，写操作在 Runner 本地生效但不转发，不影响 Pipeline。
 
 ### AstrBot 数据
 
@@ -334,7 +334,7 @@ class LLMService:
 
 `current_provider` 和 `list_providers` 只返回插件已获得对应模型 capability 的 Provider 类型。
 
-不提供 `get_using_provider()` 或 `get_provider_by_id()` 形式的 Provider 代理。旧版兼容层可以提供代理，但新版接口直接表达操作。
+不提供 `get_using_provider()` 或 `get_provider_by_id()` 形式的 Provider 代理。SDK 接口直接表达操作。
 
 ### Conversation
 
@@ -494,7 +494,7 @@ class PluginRegistryService:
 
 `on.command` 和 `on.message` 是不同授权语义。command 由用户明确调用，默认可用；`on.message` 观察普通平台消息，需要 `message.receive`。
 
-正则表达式是 message filter，不是独立事件类型。新版接口使用 `on.message(regex=...)`；旧版兼容层继续支持 `filter.regex`。
+正则表达式是 message filter，不是独立事件类型。新版接口使用 `on.message(regex=...)`。
 
 `hooks.*` 使用独立的 SDK namespace，但不创建同名 capability。hook 是接入机制，实际权限由它观察或修改的 Pipeline 资源决定。
 
@@ -524,7 +524,7 @@ class PluginRegistryService:
 | `context.send_message` | `ctx.messages.send` |
 | `event.unified_msg_origin`、`event.session` | `event.umo` |
 | `event.send` | `ctx.messages.send(event.umo, ...)` |
-| `session_waiter` | 第一阶段新版不提供；旧版兼容层处理 |
+| `session_waiter` | SDK 使用 `ctx.sessions.wait()` |
 | `filter.regex`、`filter.event_message_type` | `on.message` 的可序列化 filter |
 | LLM、Agent、Tool 和消息 Pipeline hook | `hooks.*` |
 | `get_using_provider`、`get_provider_by_id` | `ctx.llm.current_provider`、`ctx.llm.list_providers` |
@@ -532,7 +532,7 @@ class PluginRegistryService:
 | `context.tool_loop_agent` | `ctx.llm.run_agent` |
 | `conversation_manager` | `ctx.conversations` |
 | `persona_manager` | `ctx.personas` |
-| `event.bot.api.call_action` | 第一阶段新版不提供；旧版兼容层处理 |
+| `event.bot.api.call_action` | 无对应 SDK 接口 |
 | `html_render`、`text_to_image` | `ctx.render.html`、`ctx.render.text` |
 | `put_kv_data`、`get_kv_data`、`delete_kv_data` | `ctx.storage.set/get/delete` |
 | `StarTools.get_data_dir` | `ctx.storage.data_dir` |
@@ -543,13 +543,12 @@ class PluginRegistryService:
 
 ## 第一阶段不提供
 
-以下接口只由旧版兼容层处理，不进入新版 `ctx`：
+以下接口没有对应的 SDK 服务：
 
 - AstrBot 全局配置对象；
 - Provider、ProviderManager 和全局 ToolManager；
 - Platform、PlatformManager 和平台 client；
 - 平台适配器原生 action；
-- 新版 session waiter；
 - AstrBot 数据库和 ORM 对象；
 - Event Queue；
 - 插件实例和 Star registry；
@@ -563,7 +562,7 @@ class PluginRegistryService:
 
 ## 协议约束
 
-- stdio、WebSocket 和进程内适配器提供同一套公开语义。
+- stdio 和 WebSocket 提供同一套公开语义。
 - 所有参数、返回值和异常都有稳定的协议类型。
 - RPC 支持 deadline、取消和流式背压。
 - 本地文件通过 `AssetRef` 传输。

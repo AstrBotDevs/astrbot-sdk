@@ -21,10 +21,6 @@ class UnsupportedMetadataVersion(InvalidPluginMetadata):
     code = "UNSUPPORTED_METADATA_VERSION"
 
 
-class LegacyPluginMetadata(InvalidPluginMetadata):
-    code = "LEGACY_PLUGIN_METADATA"
-
-
 class PluginImportError(AstrBotSDKError):
     code = "PLUGIN_IMPORT_ERROR"
 

@@ -25,7 +25,7 @@ class WSPluginClient(StdioPluginClient):
         Args:
             transport: Accepted connection wrapped as a frame transport.
             **kwargs: Forwarded to StdioPluginClient (timeout, logger,
-                capability_handler, legacy, start_timeout).
+                capability_handler, start_timeout).
         """
         super().__init__(None, **kwargs)
         self._transport: FrameTransport | None = transport
