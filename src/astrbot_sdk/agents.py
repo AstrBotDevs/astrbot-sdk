@@ -461,9 +461,11 @@ class AgentRun:
             "agent.run", "events", {"run_id": self.id}
         )
 
-    async def session(self) -> AgentSessionStatus:
+    async def get_session(self) -> AgentSessionStatus:
         """Return the current state of the turn's runtime session."""
         return await self._call("session")
+
+    session = get_session
 
     async def cancel(self) -> None:
         await self._call("cancel")

@@ -704,7 +704,7 @@ Question / Answer 类型位于 `astrbot_sdk.decision`，支持 choice、boolean�
 提交一轮，沿用会话配置。声明 `agent.run`。输入、输出及运行事件类型位于
 `astrbot_sdk.agents`。图片和文件输入使用 HTTP(S) URL 或上传后得到的
 `AssetRef`。调用返回 `AgentRun`，可等待 `result()`、迭代 `events()`，
-或者调用 `session()`、`cancel()`、`follow_up()` 和 `steer()`。steer 被接收后
+或者调用 `get_session()`、`cancel()`、`follow_up()` 和 `steer()`。steer 被接收后
 返回可等待的消费回执。默认由 Core 投递回复。设置 `send_to_user=False` 时，
 通过 `output.ready` 获取准备好的输出。传入的 JSON `metadata` 在该轮事件上
 可通过 `event.agent_metadata` 读取。Runner 断线后，Host 会清理句柄并取消
@@ -727,6 +727,6 @@ Question / Answer 类型位于 `astrbot_sdk.decision`，支持 choice、boolean�
 本插件的视图动作，并通过 `event.get_ui_interaction()` 读取快照。
 工具可返回带名称的 `ViewResult` 来创建视图。
 
-`await ctx.locale()` 获取当前会话的 bot 回复语言，后台调用时采用默认配置。
+`await ctx.get_locale()` 获取当前会话的 bot 回复语言，后台调用时采用默认配置。
 也可指定 UMO。声明 `session.locale`。`hooks.agent_end` 可以接收
 `astrbot_sdk.hooks.AgentEnd`，包含结束原因、错误和可空的最终模型响应。

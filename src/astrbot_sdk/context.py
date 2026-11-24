@@ -100,13 +100,15 @@ class PluginContext[ConfigT]:
         self.llm = LLMService(self)
         self.web = WebService(self)
 
-    async def locale(self, umo: UMO | None = None) -> str:
+    async def get_locale(self, umo: UMO | None = None) -> str:
         """Resolve the bot reply language for this session or the default profile."""
         return await self._invoke_capability(
             "session.locale",
             "get",
             {"umo": umo if umo is not None else self._ambient_umo()},
         )
+
+    locale = get_locale
 
     def _register_dynamic_tool(
         self,
