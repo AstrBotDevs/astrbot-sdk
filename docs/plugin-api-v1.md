@@ -692,3 +692,41 @@ Host 错误通过 stdio 和 WebSocket 映射为相同的 SDK 异常。
 - 运行时新增 command、message handler 或 hook；
 - 修改 `agent_start`/`agent_end`、`message_sent` 阶段的 Pipeline 数据；
 - 从 Tool、hook 或生命周期方法 `yield` 消息结果。
+
+## 判断模型、会话 Agent 与交互
+
+`ctx.decision.ask(questions, state=..., provider_id=...)` 批量返回判断结果。
+Question / Answer 类型位于 `astrbot_sdk.decision`，支持 choice、boolean、score。
+单题可用 `choose()` 或 `yes_no()`。省略 Provider ID 时使用 Core 配置的默认
+判断模型。声明 `decision.ask`。
+
+`ctx.agent.run_turn(input_message=[PlainInput("你好")], umo=event.umo)` 向会话
+提交一轮，沿用会话配置。声明 `agent.run`。输入、输出及运行事件类型位于
+`astrbot_sdk.agents`。图片和文件输入使用 HTTP(S) URL 或上传后得到的
+`AssetRef`。调用返回 `AgentRun`，可等待 `result()`、迭代 `events()`，
+或者调用 `session()`、`cancel()`、`follow_up()` 和 `steer()`。steer 被接收后
+返回可等待的消费回执。默认由 Core 投递回复。设置 `send_to_user=False` 时，
+通过 `output.ready` 获取准备好的输出。传入的 JSON `metadata` 在该轮事件上
+可通过 `event.agent_metadata` 读取。Runner 断线后，Host 会清理句柄并取消
+该 Runner 提交的未完成 turn。
+
+`ctx.conversations.append_message()` 往已有对话追加模型消息。
+`append_plugin_event()` 和 `list_plugin_events()` 写入和分页查询插件自己的
+事件，不改变模型上下文。两种追加方法分别接受 `message_id` 和 `event_id`
+用于重试。用读取到的 `Conversation.revision` 作为 `update()` 的
+`expected_revision` 可以检测并发冲突。从已保存的上下文事件创建分支使用
+`fork()`。这些方法沿用 `conversation.read` 和 `conversation.write`。
+
+`Button`、`ActionRow`、`CallbackAction`、`UrlAction` 位于
+`astrbot_sdk.message_components`。用 `@on.button_action("plugin:action")`
+接收按钮点击，并通过 `event.get_button_interaction()` 读取数据。SDK
+插件可在 `metadata.yaml` 的 `views` 中声明 `name`、`target`、
+`version` 和 `actions`，资源入口为 `views/<name>/index.html`。
+`event.view_result(name=..., text=..., data=...)` 创建视图，省略 `name`
+则替换当前交互视图的数据。用 `@on.ui_action("plugin:action")` 接收
+本插件的视图动作，并通过 `event.get_ui_interaction()` 读取快照。
+工具可返回带名称的 `ViewResult` 来创建视图。
+
+`await ctx.locale()` 获取当前会话的 bot 回复语言，后台调用时采用默认配置。
+也可指定 UMO。声明 `session.locale`。`hooks.agent_end` 可以接收
+`astrbot_sdk.hooks.AgentEnd`，包含结束原因、错误和可空的最终模型响应。

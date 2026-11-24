@@ -425,17 +425,26 @@ class LoadedPlugin:
         if parameters and dto is not None:
             args.append(dto)
 
-        outcome = registration.handler(*args)
-        if inspect.isasyncgen(outcome):
-            await outcome.aclose()
-            raise InvalidHandlerResult("hook handler cannot yield results")
-        if not inspect.isawaitable(outcome):
-            raise InvalidHandlerResult(
-                f"hook handler {handler_id!r} did not return an awaitable"
-            )
-        result = await outcome
-        if result is not None:
-            raise InvalidHandlerResult(f"hook handler {handler_id!r} must return None")
+        ctx = self.instance.ctx
+        umo_token = ctx._bind_ambient_umo(event.umo if event is not None else None)
+        event_token = ctx._bind_ambient_event(event)
+        try:
+            outcome = registration.handler(*args)
+            if inspect.isasyncgen(outcome):
+                await outcome.aclose()
+                raise InvalidHandlerResult("hook handler cannot yield results")
+            if not inspect.isawaitable(outcome):
+                raise InvalidHandlerResult(
+                    f"hook handler {handler_id!r} did not return an awaitable"
+                )
+            result = await outcome
+            if result is not None:
+                raise InvalidHandlerResult(
+                    f"hook handler {handler_id!r} must return None"
+                )
+        finally:
+            ctx._reset_ambient_event(event_token)
+            ctx._reset_ambient_umo(umo_token)
         from ..hooks import HookDTO
 
         return {

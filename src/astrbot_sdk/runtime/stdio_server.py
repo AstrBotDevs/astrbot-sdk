@@ -447,6 +447,8 @@ class StdioPluginServer:
                         "regex": spec.regex,
                         "regex_flags": spec.regex_flags,
                     }
+                elif spec.kind in (HandlerKind.BUTTON_ACTION, HandlerKind.UI_ACTION):
+                    details = {"action_id": spec.action_id}
                 handlers.append(
                     {
                         "id": registration.id,

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
 from .assets import AssetRef
+from .protocol_registry import JSONValue, register_protocol_dataclass
 
 
 class MessageSegment:
@@ -175,3 +177,72 @@ class UnknownSegment(MessageSegment):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+
+
+class ButtonStyle(StrEnum):
+    DEFAULT = "default"
+    PRIMARY = "primary"
+    SUCCESS = "success"
+    DANGER = "danger"
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class CallbackAction:
+    data: JSONValue = None
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class UrlAction:
+    url: str
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class Button(MessageSegment):
+    id: str
+    label: str
+    action: CallbackAction | UrlAction
+    style: ButtonStyle = ButtonStyle.DEFAULT
+    type: ClassVar[str] = "Button"
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class ActionRow(MessageSegment):
+    buttons: tuple[Button, ...]
+    fallback_text: str | None = None
+    action_timeout: float | None = None
+    type: ClassVar[str] = "ActionRow"
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class ButtonInteraction(MessageSegment):
+    action_id: str
+    interaction_id: str
+    data: JSONValue = None
+    source_message_id: str | None = None
+    type: ClassVar[str] = "ButtonInteraction"
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class ViewContext:
+    id: str
+    name: str
+    version: int
+    revision: int
+    data: dict[str, JSONValue]
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class UIInteraction(MessageSegment):
+    action_id: str
+    interaction_id: str
+    view: ViewContext
+    data: JSONValue = None
+    source_message_id: str | None = None
+    type: ClassVar[str] = "UIInteraction"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from .llm import ChatResponse
 from .messages import MessageChain
 from .protocol.codec import encode_message_chain, encode_value
 from .protocol_registry import register_protocol_dataclass
@@ -201,6 +202,15 @@ class PluginError:
     traceback: str
 
 
+@dataclass(frozen=True, slots=True)
+class AgentEnd:
+    """Observe why the Agent ended, with an optional final model response."""
+
+    run_end_reason: str | None
+    run_error: str | None
+    response: ChatResponse | None
+
+
 def build_stage_dto(stage: str, payload: Any) -> Any:
     """Build the stage DTO for one hook stage from its snapshot payload.
 
@@ -218,6 +228,12 @@ def build_stage_dto(stage: str, payload: Any) -> Any:
         dto = ToolResult(**payload)
     elif stage == "message_result":
         dto = MessageResult(**payload)
+    elif stage == "agent_end":
+        return AgentEnd(
+            payload.get("run_end_reason"),
+            payload.get("run_error"),
+            payload.get("response"),
+        )
     elif stage == "plugin_error":
         return PluginError(**payload)
     elif stage in {"plugin_loaded", "plugin_unloaded"}:

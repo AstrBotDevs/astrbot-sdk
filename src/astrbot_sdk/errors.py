@@ -45,6 +45,10 @@ class CapabilityDenied(AstrBotSDKError):
     code = "CAPABILITY_DENIED"
 
 
+class DecisionError(AstrBotSDKError):
+    code = "DECISION_ERROR"
+
+
 class NotFound(AstrBotSDKError):
     code = "NOT_FOUND"
 
@@ -92,6 +96,7 @@ _REMOTE_ERROR_TYPES: dict[str, type[AstrBotSDKError]] = {
     "CAPABILITY_DENIED": CapabilityDenied,
     "NOT_FOUND": NotFound,
     "CONFLICT": Conflict,
+    "DECISION_ERROR": DecisionError,
     "RATE_LIMITED": RateLimited,
     "DEADLINE_EXCEEDED": DeadlineExceeded,
     "HOST_UNAVAILABLE": HostUnavailable,

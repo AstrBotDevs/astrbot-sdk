@@ -8,9 +8,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .agents import AgentService
 from .capabilities import CapabilitySet
 from .conversations import ConversationService
+from .decision import DecisionService
 from .errors import CapabilityDenied, HostUnavailable, RemoteError, map_remote_error
+from .events import UMO
 from .llm import LLMService
 from .plugins import PluginRegistryService
 from .protocol_registry import register_protocol_dataclass
@@ -64,6 +67,8 @@ class PluginContext[ConfigT]:
     render: RenderService = field(init=False)
     sessions: SessionService = field(init=False)
     tools: ToolService = field(init=False)
+    agent: AgentService = field(init=False)
+    decision: DecisionService = field(init=False)
     llm: LLMService = field(init=False)
     web: WebService = field(init=False)
     _host_capability_invoker: HostCapabilityInvoker | None = field(
@@ -90,8 +95,18 @@ class PluginContext[ConfigT]:
         self.render = RenderService(self)
         self.sessions = SessionService(self)
         self.tools = ToolService(self)
+        self.agent = AgentService(self)
+        self.decision = DecisionService(self)
         self.llm = LLMService(self)
         self.web = WebService(self)
+
+    async def locale(self, umo: UMO | None = None) -> str:
+        """Resolve the bot reply language for this session or the default profile."""
+        return await self._invoke_capability(
+            "session.locale",
+            "get",
+            {"umo": umo if umo is not None else self._ambient_umo()},
+        )
 
     def _register_dynamic_tool(
         self,

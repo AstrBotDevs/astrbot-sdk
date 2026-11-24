@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+type JSONValue = (
+    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+)
+
+
 _PROTOCOL_DATACLASSES: dict[str, type] = {}
 
 

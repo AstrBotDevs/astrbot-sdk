@@ -102,6 +102,8 @@ Capability 是用户授权和 Host 鉴权的单位，不与 Python 方法一一�
 
 | Capability | 允许的行为 |
 | --- | --- |
+| `decision.ask` | 调用 Core 配置的判断模型，批量获取结构化结果 |
+| `agent.run` | 调用已配置的会话 Agent，读取并控制自己提交的 turn |
 | `llm.generate` | 调用聊天模型、流式生成，并读取可用聊天 Provider 的公开元数据 |
 | `llm.agent` | 启动可执行 Tool 的多步 Agent loop |
 | `llm.embed` | 调用 Embedding Provider |
@@ -123,8 +125,9 @@ hook 收到的是 Runner 本地可写 DTO，不是 Host 内部可变对象。插
 
 | Capability | 允许的行为 |
 | --- | --- |
-| `conversation.read` | 读取指定 UMO 的当前对话、对话列表和消息上下文 |
-| `conversation.write` | 创建、切换、更新和删除对话，追加对话消息 |
+| `session.locale` | 查询当前会话或默认配置的 bot 回复语言 |
+| `conversation.read` | 读取指定 UMO 的对话、消息上下文和本插件的事件 |
+| `conversation.write` | 创建、切换、更新和删除对话，追加消息和插件事件，从已保存的位置创建分支 |
 | `persona.read` | 读取 Persona 列表、指定 Persona 和 UMO 当前生效的 Persona |
 
 `conversation.write` 不隐含 `conversation.read`。需要读后写的插件必须同时声明两项。

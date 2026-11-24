@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from ..assets import AssetRef
+from ..chatui import ViewResult
 from ..errors import InvalidRequest
 from ..events import (
     UMO,
@@ -20,8 +21,11 @@ from ..events import (
     SenderRole,
 )
 from ..message_components import (
+    ActionRow,
     At,
     AtAll,
+    Button,
+    ButtonInteraction,
     Face,
     File,
     Forward,
@@ -33,6 +37,7 @@ from ..message_components import (
     Plain,
     Record,
     Reply,
+    UIInteraction,
     UnknownSegment,
     Video,
 )
@@ -40,11 +45,10 @@ from ..messages import MessageChain
 from ..protocol_registry import (
     _PROTOCOL_DATACLASSES,
 )
-from ..results import EventResult, MessageResult, Propagation
-
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+from ..protocol_registry import (
+    JSONValue as JSONValue,
 )
+from ..results import EventResult, MessageResult, Propagation
 
 
 def _coerce_value(annotation: Any, raw: Any) -> Any:
@@ -306,6 +310,8 @@ def encode_message_event(event: MessageEvent) -> dict[str, JSONValue]:
         "timestamp": event.timestamp.isoformat(),
         "command": command,
         "is_wake": event.is_wake,
+        "source_token": event._source_token,
+        "agent_metadata": encode_value(event.agent_metadata),
     }
 
 
@@ -362,6 +368,8 @@ def decode_message_event(data: Mapping[str, Any]) -> MessageEvent:
             timestamp=datetime.fromisoformat(str(data["timestamp"])),
             command=command,
             is_wake=bool(data.get("is_wake", False)),
+            _source_token=data.get("source_token"),
+            agent_metadata=dict(data.get("agent_metadata", {})),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidRequest("invalid MessageEvent payload") from exc
@@ -505,6 +513,10 @@ def _encode_segment(
         return {"type": "Face", "id": segment.id}
     if isinstance(segment, Forward):
         return {"type": "Forward", "id": segment.id}
+    if isinstance(segment, Button | ActionRow) or (
+        allow_unknown and isinstance(segment, ButtonInteraction | UIInteraction)
+    ):
+        return {"type": segment.type, "data": encode_value(segment)}
     if isinstance(segment, MediaSegment):
         return _encode_media(segment)
     if isinstance(segment, Node):
@@ -532,6 +544,21 @@ def _decode_segment(data: Mapping[str, Any]) -> MessageSegment:
     """Decode one segment, downgrading unknown types to UnknownSegment."""
     try:
         segment_type = data.get("type")
+        if segment_type in {
+            "Button",
+            "ActionRow",
+            "ButtonInteraction",
+            "UIInteraction",
+        }:
+            segment = decode_value(data["data"])
+            if (
+                not isinstance(
+                    segment, (Button, ActionRow, ButtonInteraction, UIInteraction)
+                )
+                or segment.type != segment_type
+            ):
+                raise TypeError
+            return segment
         if segment_type == "Plain":
             return Plain(str(data["text"]))
         if segment_type == "At":
@@ -661,6 +688,8 @@ def encode_result(result: EventResult | None) -> JSONValue:
         "type": "event",
         "propagation": result.propagation.value,
     }
+    if isinstance(result, ViewResult):
+        return {"type": "view", "value": encode_value(result)}
     if isinstance(result, MessageResult):
         data.update(
             {
@@ -689,6 +718,11 @@ def decode_result(data: Any) -> EventResult | None:
     if not isinstance(data, Mapping):
         raise InvalidRequest("handler result must be an object or null")
     try:
+        if data.get("type") == "view":
+            result = decode_value(data["value"])
+            if not isinstance(result, ViewResult):
+                raise TypeError
+            return result
         propagation = Propagation(str(data["propagation"]))
         if data.get("type") == "event":
             return EventResult(propagation=propagation)

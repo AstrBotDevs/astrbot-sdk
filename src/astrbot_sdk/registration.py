@@ -22,6 +22,8 @@ _HANDLER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 class HandlerKind(StrEnum):
     COMMAND = "command"
     MESSAGE = "message"
+    BUTTON_ACTION = "button_action"
+    UI_ACTION = "ui_action"
     TOOL = "tool"
     HOOK_LLM_REQUEST = "hook.llm_request"
     HOOK_LLM_RESPONSE = "hook.llm_response"
@@ -93,6 +95,7 @@ class HandlerSpec:
     roles: tuple[SenderRole, ...] = ()
     regex: str | None = None
     regex_flags: int = 0
+    action_id: str | None = None
 
     @property
     def required_capability(self) -> str | None:
@@ -264,6 +267,38 @@ class _OnNamespace:
             roles=tuple(roles),
             regex=regex_pattern,
             regex_flags=regex_flags,
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
+
+    def button_action[HandlerT: Callable[..., Any]](
+        self,
+        action_id: str | None = None,
+        *,
+        priority: int = 0,
+        id: str | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Handle a portable message button click."""
+        _validate_handler_id(id)
+        if action_id is not None and not action_id:
+            raise InvalidPluginDefinition("action ID must not be empty")
+        spec = HandlerSpec(
+            HandlerKind.BUTTON_ACTION, id=id, priority=priority, action_id=action_id
+        )
+        return lambda handler: _attach_handler_spec(handler, spec)
+
+    def ui_action[HandlerT: Callable[..., Any]](
+        self,
+        action_id: str | None = None,
+        *,
+        priority: int = 0,
+        id: str | None = None,
+    ) -> Callable[[HandlerT], HandlerT]:
+        """Handle actions from this plugin's registered chat views."""
+        _validate_handler_id(id)
+        if action_id is not None and not action_id:
+            raise InvalidPluginDefinition("action ID must not be empty")
+        spec = HandlerSpec(
+            HandlerKind.UI_ACTION, id=id, priority=priority, action_id=action_id
         )
         return lambda handler: _attach_handler_spec(handler, spec)
 
@@ -544,6 +579,7 @@ def discover_handlers(plugin: object) -> tuple[HandlerRegistration, ...]:
             roles=spec.roles,
             regex=spec.regex,
             regex_flags=spec.regex_flags,
+            action_id=spec.action_id,
             tool_name=spec.tool_name,
         )
         registrations.append(

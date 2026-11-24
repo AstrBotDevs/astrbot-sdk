@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .events import UMO
-from .protocol_registry import register_protocol_dataclass
+from .protocol_registry import JSONValue, register_protocol_dataclass
 
 if TYPE_CHECKING:
     from .context import PluginContext
@@ -72,6 +72,27 @@ class Message:
 
 @register_protocol_dataclass
 @dataclass(frozen=True, slots=True)
+class ConversationRevision:
+    """The event log revision and the current position in model context."""
+
+    head_seq: int
+    leaf_event_id: str | None
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
+class ConversationEvent:
+    """An event in this plugin's conversation event namespace."""
+
+    event_id: str
+    seq: int
+    event_type: str
+    data: dict[str, JSONValue]
+    created_at: datetime
+
+
+@register_protocol_dataclass
+@dataclass(frozen=True, slots=True)
 class Conversation:
     """AstrBot LLM conversation owned by one UMO session."""
 
@@ -81,6 +102,7 @@ class Conversation:
     messages: tuple[Message, ...]
     created_at: datetime | None
     updated_at: datetime | None
+    revision: ConversationRevision | None = None
 
 
 @register_protocol_dataclass
@@ -180,6 +202,8 @@ class ConversationService:
         umo: UMO,
         conversation_id: str,
         patch: ConversationPatch,
+        *,
+        expected_revision: ConversationRevision | None = None,
     ) -> Conversation:
         """Apply a patch to one conversation and return the updated value."""
         result = await self._ctx._invoke_capability(
@@ -189,6 +213,7 @@ class ConversationService:
                 "umo": umo,
                 "conversation_id": conversation_id,
                 "patch": patch,
+                "expected_revision": expected_revision,
             },
         )
         return result["conversation"]
@@ -208,6 +233,77 @@ class ConversationService:
                 "conversation_id": conversation_id,
                 "messages": list(messages),
             },
+        )
+
+    async def append_message(
+        self,
+        umo: UMO,
+        conversation_id: str,
+        content: str | tuple[ContentPart, ...],
+        *,
+        message_id: str | None = None,
+    ) -> str:
+        """Append a user message and return its committed ID."""
+        return await self._ctx._invoke_capability(
+            _WRITE_CAPABILITY,
+            "append_message",
+            {
+                "umo": umo,
+                "conversation_id": conversation_id,
+                "content": content,
+                "message_id": message_id,
+            },
+        )
+
+    async def append_plugin_event(
+        self,
+        umo: UMO,
+        conversation_id: str,
+        event_type: str,
+        data: dict[str, JSONValue],
+        *,
+        event_id: str | None = None,
+    ) -> str:
+        """Append a private plugin event outside the model context."""
+        return await self._ctx._invoke_capability(
+            _WRITE_CAPABILITY,
+            "append_plugin_event",
+            {
+                "umo": umo,
+                "conversation_id": conversation_id,
+                "event_type": event_type,
+                "data": data,
+                "event_id": event_id,
+            },
+        )
+
+    async def list_plugin_events(
+        self,
+        umo: UMO,
+        conversation_id: str,
+        event_type: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 100,
+    ) -> tuple[ConversationEvent, ...]:
+        """Read this plugin's events of one type after an exclusive sequence."""
+        result = await self._ctx._invoke_capability(
+            _READ_CAPABILITY,
+            "list_plugin_events",
+            {
+                "umo": umo,
+                "conversation_id": conversation_id,
+                "event_type": event_type,
+                "after_seq": after_seq,
+                "limit": limit,
+            },
+        )
+        return tuple(result)
+
+    async def fork(self, umo: UMO, source_event_id: str) -> str:
+        """Create a new conversation from a saved model-context event."""
+        return await self._ctx._invoke_capability(
+            _WRITE_CAPABILITY, "fork", {"umo": umo, "source_event_id": source_event_id}
         )
 
     async def delete(self, umo: UMO, conversation_id: str) -> None:

@@ -5,10 +5,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .message_components import ButtonInteraction, UIInteraction
 from .messages import MessageChain, MessageLike
+from .protocol_registry import JSONValue
 from .results import EventResult, MessageResult, Propagation, message_result
+
+if TYPE_CHECKING:
+    from .chatui import ViewResult
 
 
 class MessageType(StrEnum):
@@ -65,6 +70,8 @@ class MessageEvent:
     timestamp: datetime
     command: CommandInvocation | None = None
     is_wake: bool = False
+    _source_token: str | None = field(default=None, repr=False, compare=False)
+    agent_metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -86,6 +93,31 @@ class MessageEvent:
         propagation: Propagation = Propagation.CONTINUE,
     ) -> MessageResult:
         return message_result(content, quote=quote, propagation=propagation)
+
+    def get_button_interaction(self) -> ButtonInteraction | None:
+        return next(
+            (part for part in self.message if isinstance(part, ButtonInteraction)), None
+        )
+
+    def get_ui_interaction(self) -> UIInteraction | None:
+        return next(
+            (part for part in self.message if isinstance(part, UIInteraction)), None
+        )
+
+    def view_result(
+        self,
+        *,
+        data: dict[str, JSONValue],
+        name: str | None = None,
+        text: str = "",
+        title: str = "",
+    ) -> ViewResult:
+        """Create a named card or replace the card initiating this action."""
+        from .chatui import ViewResult
+
+        if name is None and self.get_ui_interaction() is None:
+            raise ValueError("updating a view requires a UI interaction")
+        return ViewResult(data=data, name=name, text=text, title=title)
 
     def stop(self) -> EventResult:
         return EventResult(propagation=Propagation.STOP)
