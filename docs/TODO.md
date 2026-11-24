@@ -47,15 +47,9 @@
 主仓库的 conversation 后端将重构为 event log（线性事件 + 完整 rebase，
 分支在 AstrBot-event-context）。合并后跟进：
 
-- [ ] `ConversationPatch`/`ctx.conversations.update` 支持 `expected_revision`，
-  对齐 event-context 的乐观并发（event_writer）。
-- [ ] 评估在 `ctx.conversations` 增加事件读写（seq 游标 append/list/latest）
-  与 `fork_conversation`。
 - [ ] custom agent runner 的 `AgentStep`/`AgentEvent` 直接采用 event-context
   的类型化 agent 事件（turn/request/tool/message/rebase + event_id），
   填充当前预留的 `AgentResponse.steps`。
-- [ ] 桥接测试的 `FakeConversationManager` 补 `revision` 字段，保持与真实
-  ConversationManager 形状一致。
 
 ## SDK 服务
 

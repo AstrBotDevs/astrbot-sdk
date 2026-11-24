@@ -33,6 +33,14 @@ class UMO:
     message_type: MessageType
     session_id: str
 
+    def __str__(self) -> str:
+        message_type = {
+            MessageType.PRIVATE: "FriendMessage",
+            MessageType.GROUP: "GroupMessage",
+            MessageType.OTHER: "OtherMessage",
+        }[self.message_type]
+        return f"{self.platform_id}:{message_type}:{self.session_id}"
+
 
 @dataclass(frozen=True, slots=True)
 class MessageRef:
@@ -72,6 +80,11 @@ class MessageEvent:
     is_wake: bool = False
     _source_token: str | None = field(default=None, repr=False, compare=False)
     agent_metadata: Mapping[str, JSONValue] = field(default_factory=dict)
+
+    @property
+    def unified_msg_origin(self) -> str:
+        """Return the Core-style session address."""
+        return str(self.umo)
 
     @property
     def text(self) -> str:

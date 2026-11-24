@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,8 +12,7 @@ from astrbot_sdk.capabilities import CapabilityGrant, CapabilitySet
 from astrbot_sdk.context import PluginContext, PluginInfo, RuntimeMode
 from astrbot_sdk.conversations import (
     Conversation,
-    ConversationPage,
-    ConversationPatch,
+    ConversationRevision,
     Message,
 )
 from astrbot_sdk.errors import NotFound, RemoteHostError, map_remote_error
@@ -93,34 +93,25 @@ def write_plugin(
 
 def make_conversation() -> Conversation:
     return Conversation(
-        id="conv-1",
+        platform_id="platform-1",
+        user_id="platform-1:FriendMessage:user-1",
+        cid="conv-1",
         title="chat",
-        persona_id=None,
-        messages=(
-            Message(role="user", content="hi"),
-            Message(role="assistant", content="hello"),
-            Message(
-                role="assistant",
-                content=None,
-                tool_calls=({"name": "get_weather", "args": {"city": "sh"}},),
-            ),
-            Message(role="tool", content="sunny", tool_call_id="call-1"),
+        history=json.dumps(
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
         ),
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=None,
+        created_at=1767225600,
+        revision=ConversationRevision(3, "event-1"),
     )
 
 
 def test_generic_dataclass_codec_roundtrip() -> None:
     conversation = make_conversation()
-    decoded = decode_value(encode_value(conversation))
-    assert decoded == conversation
-
-    page = ConversationPage(items=(conversation,), next_cursor="2")
-    assert decode_value(encode_value(page)) == page
-
-    patch = ConversationPatch(title="new")
-    assert decode_value(encode_value(patch)) == patch
+    assert decode_value(encode_value(conversation)) == conversation
+    assert decode_value(encode_value([conversation])) == [conversation]
 
 
 def test_codec_ignores_unknown_fields_for_forward_compat() -> None:
@@ -140,53 +131,69 @@ def test_map_remote_error_translates_known_codes() -> None:
 async def test_conversation_service_routes_operations() -> None:
     calls: list[tuple[str, str, dict[str, Any]]] = []
     conversation = make_conversation()
+    cid = conversation.cid
+    umo = make_event().unified_msg_origin
+    user_message = {"role": "user", "content": "again"}
+    assistant_message = {"role": "assistant", "content": "okay"}
 
     async def invoker(capability: str, operation: str, payload: dict[str, Any]):
         calls.append((capability, operation, payload))
-        if operation in {"current", "get"}:
-            return {"conversation": conversation}
-        if operation == "list":
-            return {"page": ConversationPage(items=(conversation,), next_cursor=None)}
-        if operation in {"create", "update"}:
-            return {"conversation": conversation}
-        return {}
+        if operation in {"get_curr_conversation_id", "new_conversation"}:
+            return cid
+        if operation == "get_conversation":
+            return conversation
+        if operation == "get_conversations":
+            return [conversation]
+        if operation in {"append_message", "append_plugin_event", "fork_conversation"}:
+            return "new-id"
+        return None
 
     ctx = make_context(
         grants=CapabilitySet.from_ids("conversation.read", "conversation.write"),
         invoker=invoker,
     )
-    umo = UMO("platform-1", MessageType.PRIVATE, "user-1")
-
-    assert await ctx.conversations.current(umo) == conversation
-    assert await ctx.conversations.get(umo, "conv-1") == conversation
-    page = await ctx.conversations.list(umo, limit=10)
-    assert page.items == (conversation,)
-    assert await ctx.conversations.create(umo, title="t") == conversation
-    await ctx.conversations.set_current(umo, "conv-1")
+    conversations = ctx.conversations
+    assert await conversations.get_curr_conversation_id(umo) == cid
+    assert await conversations.get_conversation(umo, cid) == conversation
+    assert await conversations.get_conversations(umo, "platform-1") == [conversation]
+    assert await conversations.new_conversation(umo, title="t") == cid
+    assert await conversations.switch_conversation(umo, cid) is None
     assert (
-        await ctx.conversations.update(umo, "conv-1", ConversationPatch(title="t"))
-    ) == conversation
-    await ctx.conversations.append(
-        umo,
-        "conv-1",
-        (Message(role="user", content="again"),),
+        await conversations.update_conversation(
+            umo, title="t", expected_revision=conversation.revision
+        )
+        is None
     )
-    await ctx.conversations.delete(umo, "conv-1")
+    assert (
+        await conversations.add_message_pair(cid, user_message, assistant_message)
+        is None
+    )
+    assert await conversations.append_message("again", cid=cid) == "new-id"
+    assert (
+        await conversations.append_plugin_event("done", {"ok": True}, cid=cid)
+        == "new-id"
+    )
+    assert await conversations.fork_conversation(umo, "new-id") == "new-id"
+    assert await conversations.delete_conversation(umo) is None
 
     assert [call[1] for call in calls] == [
-        "current",
-        "get",
-        "list",
-        "create",
-        "set_current",
-        "update",
-        "append",
-        "delete",
+        "get_curr_conversation_id",
+        "get_conversation",
+        "get_conversations",
+        "new_conversation",
+        "switch_conversation",
+        "update_conversation",
+        "add_message_pair",
+        "append_message",
+        "append_plugin_event",
+        "fork_conversation",
+        "delete_conversation",
     ]
     assert calls[0][0] == "conversation.read"
     assert calls[3][0] == "conversation.write"
-    patch_payload = calls[5][2]["patch"]
-    assert isinstance(patch_payload, ConversationPatch)
+    assert calls[5][2]["conversation_id"] is None
+    assert calls[5][2]["expected_revision"] == conversation.revision
+    assert calls[7][2]["cid"] == cid
 
 
 @pytest.mark.asyncio
@@ -195,59 +202,53 @@ async def test_stdio_end_to_end_conversations(tmp_path: Path) -> None:
     write_plugin(
         plugin_root,
         """
+import json
+
 from astrbot_sdk import MessageEvent, Plugin, on
-from astrbot_sdk.conversations import Message
 
 class TestPlugin(Plugin):
     @on.command("remember")
     async def remember(self, event: MessageEvent, note: str):
-        conv = await self.ctx.conversations.create(
-            event.umo,
-            title="notes",
-            messages=(Message(role="user", content=note),),
+        umo = event.unified_msg_origin
+        cid = await self.ctx.conversations.new_conversation(umo, title="notes")
+        await self.ctx.conversations.add_message_pair(
+            cid,
+            {"role": "user", "content": note},
+            {"role": "assistant", "content": "got it"},
         )
-        await self.ctx.conversations.append(
-            event.umo,
-            conv.id,
-            (Message(role="assistant", content="got it"),),
-        )
-        current = await self.ctx.conversations.current(event.umo)
-        yield event.reply(f"{current.title}:{len(current.messages)}")
+        assert await self.ctx.conversations.get_curr_conversation_id(umo) == cid
+        current = await self.ctx.conversations.get_conversation(umo, cid)
+        yield event.reply(f"{current.title}:{len(json.loads(current.history))}")
 """,
         required_capabilities=("conversation.read", "conversation.write"),
     )
 
-    store: dict[str, dict[str, Any]] = {}
+    store: dict[str, Conversation] = {}
+    umo = make_event().unified_msg_origin
 
     async def host_handler(
         grant: CapabilityGrant,
         operation: str,
         payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        if grant.id == "conversation.write" and operation == "create":
-            conversation = Conversation(
-                id="conv-9",
+    ) -> Conversation | str | None:
+        if grant.id == "conversation.write" and operation == "new_conversation":
+            assert payload["unified_msg_origin"] == umo
+            store["conv-9"] = Conversation(
+                platform_id="platform-1",
+                user_id=umo,
+                cid="conv-9",
                 title=payload["title"],
-                persona_id=None,
-                messages=tuple(payload["messages"]),
-                created_at=datetime.now(UTC),
-                updated_at=None,
+                history="[]",
             )
-            store["conv-9"] = conversation
-            return {"conversation": conversation}
-        if grant.id == "conversation.write" and operation == "append":
-            conv = store[payload["conversation_id"]]
-            store[payload["conversation_id"]] = Conversation(
-                id=conv.id,
-                title=conv.title,
-                persona_id=conv.persona_id,
-                messages=conv.messages + tuple(payload["messages"]),
-                created_at=conv.created_at,
-                updated_at=conv.updated_at,
-            )
-            return {}
-        if grant.id == "conversation.read" and operation == "current":
-            return {"conversation": store.get("conv-9")}
+            return "conv-9"
+        if grant.id == "conversation.write" and operation == "add_message_pair":
+            messages = [payload["user_message"], payload["assistant_message"]]
+            store[payload["cid"]].history = json.dumps(messages)
+            return None
+        if grant.id == "conversation.read" and operation == "get_curr_conversation_id":
+            return "conv-9"
+        if grant.id == "conversation.read" and operation == "get_conversation":
+            return store.get(payload["conversation_id"])
         raise AssertionError(f"unexpected call: {grant.id} {operation}")
 
     client = StdioPluginClient(
@@ -267,7 +268,7 @@ class TestPlugin(Plugin):
             async for result in client.invoke("remember", make_event(), note="milk")
         ]
         assert [r.message.text for r in results if r is not None] == ["notes:2"]
-        assert store["conv-9"].messages[-1].content == "got it"
+        assert json.loads(store["conv-9"].history)[-1]["content"] == "got it"
     finally:
         await client.close()
 

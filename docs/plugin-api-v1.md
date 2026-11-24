@@ -713,12 +713,15 @@ Question / Answer 类型位于 `astrbot_sdk.decision`，支持 choice、boolean�
 可通过 `event.agent_metadata` 读取。Runner 断线后，Host 会清理句柄并取消
 该 Runner 提交的未完成 turn。
 
-`ctx.conversations.append_message()` 往已有对话追加模型消息。
-`append_plugin_event()` 和 `list_plugin_events()` 写入和分页查询插件自己的
-事件，不改变模型上下文。两种追加方法分别接受 `message_id` 和 `event_id`
-用于重试。用读取到的 `Conversation.revision` 作为 `update()` 的
-`expected_revision` 可以检测并发冲突。从已保存的上下文事件创建分支使用
-`fork()`。这些方法沿用 `conversation.read` 和 `conversation.write`。
+`ctx.conversations` 使用 Core 的对话接口。用
+`get_curr_conversation_id(event.unified_msg_origin)` 取得选中的对话 ID，
+再用 `get_conversation(umo, cid)` 读取对话。返回对象的 `cid` 是对话
+ID，`history` 是 JSON 字符串。使用 `append_message(content, cid=cid)`
+追加用户消息，使用 `append_plugin_event(event_type, data, cid=cid)` 写入
+插件自有事件。用 `Conversation.revision` 作为 `update_conversation()`
+的 `expected_revision` 可以检测并发冲突。使用 `fork_conversation()`
+从已保存的上下文事件创建分支。需要声明 `conversation.read` 或
+`conversation.write`。
 
 `Button`、`ActionRow`、`CallbackAction`、`UrlAction` 位于
 `astrbot_sdk.message_components`。用 `@on.button_action("plugin:action")`

@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from .events import UMO
 from .protocol_registry import JSONValue, register_protocol_dataclass
 
 if TYPE_CHECKING:
@@ -80,236 +78,209 @@ class ConversationRevision:
 
 
 @register_protocol_dataclass
-@dataclass(frozen=True, slots=True)
-class ConversationEvent:
-    """An event in this plugin's conversation event namespace."""
-
-    event_id: str
-    seq: int
-    event_type: str
-    data: dict[str, JSONValue]
-    created_at: datetime
-
-
-@register_protocol_dataclass
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Conversation:
-    """AstrBot LLM conversation owned by one UMO session."""
+    """The same conversation snapshot fields exposed by AstrBot Core."""
 
-    id: str
-    title: str | None
-    persona_id: str | None
-    messages: tuple[Message, ...]
-    created_at: datetime | None
-    updated_at: datetime | None
+    platform_id: str
+    user_id: str
+    cid: str
+    history: str = ""
+    title: str | None = ""
+    persona_id: str | None = ""
+    created_at: int = 0
+    updated_at: int = 0
+    token_usage: int = 0
     revision: ConversationRevision | None = None
 
 
-@register_protocol_dataclass
-@dataclass(frozen=True, slots=True)
-class ConversationPatch:
-    """Editable conversation fields. None leaves the field unchanged."""
-
-    title: str | None = None
-    persona_id: str | None = None
-    messages: tuple[Message, ...] | None = None
-
-
-@register_protocol_dataclass
-@dataclass(frozen=True, slots=True)
-class ConversationPage:
-    """One page of conversations."""
-
-    items: tuple[Conversation, ...]
-    next_cursor: str | None
-
-
 class ConversationService:
-    """Read and manage AstrBot conversations for UMO sessions."""
+    """Read and manage conversations through AstrBot's plugin API."""
 
     def __init__(self, ctx: PluginContext) -> None:
-        """Initialize the service.
-
-        Args:
-            ctx: Owning plugin context used for Host invocation.
-        """
         self._ctx = ctx
 
-    async def current(self, umo: UMO) -> Conversation | None:
-        """Return the session's currently selected conversation."""
-        result = await self._ctx._invoke_capability(
+    async def get_curr_conversation_id(self, unified_msg_origin: str) -> str | None:
+        """Return the selected conversation ID for a session."""
+        return await self._ctx._invoke_capability(
             _READ_CAPABILITY,
-            "current",
-            {"umo": umo},
+            "get_curr_conversation_id",
+            {"unified_msg_origin": unified_msg_origin},
         )
-        return result.get("conversation")
 
-    async def get(self, umo: UMO, conversation_id: str) -> Conversation | None:
-        """Return one conversation by ID."""
-        result = await self._ctx._invoke_capability(
-            _READ_CAPABILITY,
-            "get",
-            {"umo": umo, "conversation_id": conversation_id},
-        )
-        return result.get("conversation")
-
-    async def list(
+    async def get_conversation(
         self,
-        umo: UMO,
-        *,
-        cursor: str | None = None,
-        limit: int = 50,
-    ) -> ConversationPage:
-        """List the session's conversations, newest first."""
-        result = await self._ctx._invoke_capability(
+        unified_msg_origin: str,
+        conversation_id: str,
+        create_if_not_exists: bool = False,
+    ) -> Conversation | None:
+        """Read a conversation, optionally creating one if the ID is missing."""
+        return await self._ctx._invoke_capability(
             _READ_CAPABILITY,
-            "list",
-            {"umo": umo, "cursor": cursor, "limit": limit},
-        )
-        return result["page"]
-
-    async def create(
-        self,
-        umo: UMO,
-        *,
-        title: str | None = None,
-        persona_id: str | None = None,
-        messages: tuple[Message, ...] = (),
-    ) -> Conversation:
-        """Create a conversation and select it as the session's current one."""
-        result = await self._ctx._invoke_capability(
-            _WRITE_CAPABILITY,
-            "create",
+            "get_conversation",
             {
-                "umo": umo,
-                "title": title,
-                "persona_id": persona_id,
-                "messages": list(messages),
+                "unified_msg_origin": unified_msg_origin,
+                "conversation_id": conversation_id,
+                "create_if_not_exists": create_if_not_exists,
             },
         )
-        return result["conversation"]
 
-    async def set_current(self, umo: UMO, conversation_id: str) -> None:
-        """Select the session's current conversation."""
-        await self._ctx._invoke_capability(
-            _WRITE_CAPABILITY,
-            "set_current",
-            {"umo": umo, "conversation_id": conversation_id},
+    async def get_conversations(
+        self,
+        unified_msg_origin: str | None = None,
+        platform_id: str | None = None,
+    ) -> list[Conversation]:
+        """List conversations for the specified or current message session."""
+        return await self._ctx._invoke_capability(
+            _READ_CAPABILITY,
+            "get_conversations",
+            {
+                "unified_msg_origin": (
+                    self._ctx._ambient_umo()
+                    if unified_msg_origin is None
+                    else unified_msg_origin
+                ),
+                "platform_id": platform_id,
+            },
         )
 
-    async def update(
+    async def new_conversation(
         self,
-        umo: UMO,
-        conversation_id: str,
-        patch: ConversationPatch,
+        unified_msg_origin: str,
+        platform_id: str | None = None,
+        content: list[dict] | None = None,
+        title: str | None = None,
+        persona_id: str | None = None,
+    ) -> str:
+        """Create and select a conversation, returning its ID."""
+        return await self._ctx._invoke_capability(
+            _WRITE_CAPABILITY,
+            "new_conversation",
+            {
+                "unified_msg_origin": unified_msg_origin,
+                "platform_id": platform_id,
+                "content": content,
+                "title": title,
+                "persona_id": persona_id,
+            },
+        )
+
+    async def switch_conversation(
+        self, unified_msg_origin: str, conversation_id: str
+    ) -> None:
+        """Select a conversation for the specified session."""
+        await self._ctx._invoke_capability(
+            _WRITE_CAPABILITY,
+            "switch_conversation",
+            {
+                "unified_msg_origin": unified_msg_origin,
+                "conversation_id": conversation_id,
+            },
+        )
+
+    async def update_conversation(
+        self,
+        unified_msg_origin: str,
+        conversation_id: str | None = None,
+        history: list[dict] | None = None,
+        title: str | None = None,
+        persona_id: str | None = None,
+        token_usage: int | None = None,
         *,
         expected_revision: ConversationRevision | None = None,
-    ) -> Conversation:
-        """Apply a patch to one conversation and return the updated value."""
-        result = await self._ctx._invoke_capability(
+    ) -> None:
+        """Update an explicit or currently selected conversation."""
+        await self._ctx._invoke_capability(
             _WRITE_CAPABILITY,
-            "update",
+            "update_conversation",
             {
-                "umo": umo,
+                "unified_msg_origin": unified_msg_origin,
                 "conversation_id": conversation_id,
-                "patch": patch,
+                "history": history,
+                "title": title,
+                "persona_id": persona_id,
+                "token_usage": token_usage,
                 "expected_revision": expected_revision,
             },
         )
-        return result["conversation"]
 
-    async def append(
-        self,
-        umo: UMO,
-        conversation_id: str,
-        messages: tuple[Message, ...],
+    async def add_message_pair(
+        self, cid: str, user_message: dict, assistant_message: dict
     ) -> None:
-        """Append messages to one conversation's history."""
+        """Append a user message and its assistant reply together."""
         await self._ctx._invoke_capability(
             _WRITE_CAPABILITY,
-            "append",
+            "add_message_pair",
             {
-                "umo": umo,
-                "conversation_id": conversation_id,
-                "messages": list(messages),
+                "cid": cid,
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+                "unified_msg_origin": self._ctx._ambient_umo(),
             },
         )
 
     async def append_message(
         self,
-        umo: UMO,
-        conversation_id: str,
-        content: str | tuple[ContentPart, ...],
+        content: str | list[dict],
         *,
+        cid: str,
         message_id: str | None = None,
     ) -> str:
-        """Append a user message and return its committed ID."""
+        """Append one user message and return its committed ID."""
         return await self._ctx._invoke_capability(
             _WRITE_CAPABILITY,
             "append_message",
             {
-                "umo": umo,
-                "conversation_id": conversation_id,
+                "cid": cid,
                 "content": content,
                 "message_id": message_id,
+                "unified_msg_origin": self._ctx._ambient_umo(),
             },
         )
 
     async def append_plugin_event(
         self,
-        umo: UMO,
-        conversation_id: str,
         event_type: str,
         data: dict[str, JSONValue],
         *,
+        cid: str,
         event_id: str | None = None,
     ) -> str:
-        """Append a private plugin event outside the model context."""
+        """Append a custom event in the plugin's namespace and return its ID."""
         return await self._ctx._invoke_capability(
             _WRITE_CAPABILITY,
             "append_plugin_event",
             {
-                "umo": umo,
-                "conversation_id": conversation_id,
+                "cid": cid,
                 "event_type": event_type,
                 "data": data,
                 "event_id": event_id,
+                "unified_msg_origin": self._ctx._ambient_umo(),
             },
         )
 
-    async def list_plugin_events(
-        self,
-        umo: UMO,
-        conversation_id: str,
-        event_type: str,
-        *,
-        after_seq: int = 0,
-        limit: int = 100,
-    ) -> tuple[ConversationEvent, ...]:
-        """Read this plugin's events of one type after an exclusive sequence."""
-        result = await self._ctx._invoke_capability(
-            _READ_CAPABILITY,
-            "list_plugin_events",
-            {
-                "umo": umo,
-                "conversation_id": conversation_id,
-                "event_type": event_type,
-                "after_seq": after_seq,
-                "limit": limit,
-            },
-        )
-        return tuple(result)
-
-    async def fork(self, umo: UMO, source_event_id: str) -> str:
-        """Create a new conversation from a saved model-context event."""
+    async def fork_conversation(
+        self, unified_msg_origin: str, source_event_id: str
+    ) -> str:
+        """Create a separate conversation from a saved context event."""
         return await self._ctx._invoke_capability(
-            _WRITE_CAPABILITY, "fork", {"umo": umo, "source_event_id": source_event_id}
+            _WRITE_CAPABILITY,
+            "fork_conversation",
+            {
+                "unified_msg_origin": unified_msg_origin,
+                "source_event_id": source_event_id,
+            },
         )
 
-    async def delete(self, umo: UMO, conversation_id: str) -> None:
-        """Delete one conversation."""
+    async def delete_conversation(
+        self, unified_msg_origin: str, conversation_id: str | None = None
+    ) -> None:
+        """Delete an explicit or currently selected conversation."""
         await self._ctx._invoke_capability(
             _WRITE_CAPABILITY,
-            "delete",
-            {"umo": umo, "conversation_id": conversation_id},
+            "delete_conversation",
+            {
+                "unified_msg_origin": unified_msg_origin,
+                "conversation_id": conversation_id,
+            },
         )

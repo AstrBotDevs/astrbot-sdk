@@ -126,7 +126,7 @@ hook 收到的是 Runner 本地可写 DTO，不是 Host 内部可变对象。插
 | Capability | 允许的行为 |
 | --- | --- |
 | `session.locale` | 查询当前会话或默认配置的 bot 回复语言 |
-| `conversation.read` | 读取指定 UMO 的对话、消息上下文和本插件的事件 |
+| `conversation.read` | 读取指定 UMO 的对话和消息上下文 |
 | `conversation.write` | 创建、切换、更新和删除对话，追加消息和插件事件，从已保存的位置创建分支 |
 | `persona.read` | 读取 Persona 列表、指定 Persona 和 UMO 当前生效的 Persona |
 
@@ -341,55 +341,31 @@ class LLMService:
 
 ### Conversation
 
-```python
-class ConversationService:
-    async def current(self, umo: UMO) -> Conversation | None: ...
-    async def get(
-        self,
-        umo: UMO,
-        conversation_id: str,
-    ) -> Conversation | None: ...
-    async def list(
-        self,
-        umo: UMO,
-        *,
-        cursor: str | None = None,
-        limit: int = 50,
-    ) -> Page[Conversation]: ...
+`ctx.conversations` 沿用 AstrBot Core 的插件接口。消息处理器可用
+`event.unified_msg_origin` 取得 Core 格式的字符串 UMO。
 
-    async def create(
-        self,
-        umo: UMO,
-        *,
-        title: str | None = None,
-        persona_id: str | None = None,
-        messages: Sequence[Message] = (),
-    ) -> Conversation: ...
-    async def set_current(
-        self,
-        umo: UMO,
-        conversation_id: str,
-    ) -> None: ...
-    async def update(
-        self,
-        umo: UMO,
-        conversation_id: str,
-        patch: ConversationPatch,
-    ) -> Conversation: ...
-    async def append(
-        self,
-        umo: UMO,
-        conversation_id: str,
-        messages: Sequence[Message],
-    ) -> None: ...
-    async def delete(
-        self,
-        umo: UMO,
-        conversation_id: str,
-    ) -> None: ...
-```
+| 方法 | 返回值 |
+|---|---|
+| `get_curr_conversation_id(unified_msg_origin)` | 当前对话 ID 或 `None` |
+| `get_conversation(unified_msg_origin, conversation_id, create_if_not_exists=False)` | `Conversation` 或 `None` |
+| `get_conversations(unified_msg_origin=None, platform_id=None)` | `list[Conversation]` |
+| `new_conversation(unified_msg_origin, platform_id=None, content=None, title=None, persona_id=None)` | 选中新对话，返回 ID |
+| `switch_conversation(unified_msg_origin, conversation_id)` | `None` |
+| `update_conversation(unified_msg_origin, conversation_id=None, history=None, title=None, persona_id=None, token_usage=None, *, expected_revision=None)` | `None` |
+| `delete_conversation(unified_msg_origin, conversation_id=None)` | `None` |
+| `add_message_pair(cid, user_message, assistant_message)` | `None` |
+| `append_message(content, *, cid, message_id=None)` | 消息 ID |
+| `append_plugin_event(event_type, data, *, cid, event_id=None)` | 事件 ID |
+| `fork_conversation(unified_msg_origin, source_event_id)` | 新对话 ID |
 
-`Conversation.messages` 是结构化消息列表，不使用 JSON 字符串保存到 DTO。
+`Conversation` 通过 `cid` 返回 ID，通过 `history` 返回 JSON 字符串，
+时间戳为整数秒。写入历史时使用 Core 格式的消息字典。图片和音频使用
+HTTP(S) URL、对应媒体类型的 data URL 或已上传的 `AssetRef`。
+
+SDK 的 `get_conversations()` 在消息处理器里默认查询当前会话。后台调用
+时需显式传入 UMO。指定 `create_if_not_exists=True` 且实际创建对话时，
+插件还须声明 `conversation.write`。在处理器里按 `cid` 追加时，Host
+会核对对话属于当前会话。插件事件由 Host 按插件划分命名空间。
 
 ### Persona
 
