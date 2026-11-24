@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from .assets import AssetRef
 from .errors import InvalidRequest
-from .events import UMO
+from .events import UMO, MessageEvent
 from .message_components import File, Image, Plain, Record, Video
 from .messages import MessageChain
 from .protocol_registry import JSONValue, register_protocol_dataclass
@@ -499,26 +499,48 @@ class AgentService:
         input_message: Sequence[InputComponent],
         umo: UMO | None = None,
         send_to_user: bool = True,
+        source_event: MessageEvent | None = None,
         session_id: str | None = None,
         metadata: dict[str, JSONValue] | None = None,
     ) -> AgentRun:
-        """Submit a turn to a conversation using its configured Agent."""
-        target = umo if umo is not None else self._ctx._ambient_umo()
+        """Submit a turn to a conversation using its configured Agent.
+
+        An explicit source event must come from an active Host invocation
+        for the target UMO. Otherwise, the current event is used when its
+        UMO matches the target.
+        """
+        target = umo
+        if target is None:
+            target = (
+                source_event.umo
+                if source_event is not None
+                else self._ctx._ambient_umo()
+            )
         if target is None:
             raise InvalidRequest("agent.run requires a target UMO")
-        event = self._ctx._ambient_event()
+        if source_event is not None:
+            if not source_event._source_token:
+                raise InvalidRequest("source event must come from the Host")
+            if source_event.umo != target:
+                raise InvalidRequest("source event belongs to another UMO")
+            source_id = source_event._source_token
+        else:
+            event = self._ctx._ambient_event()
+            source_id = (
+                event._source_token
+                if event is not None and event.umo == target
+                else None
+            )
         run_id = await self._ctx._invoke_capability(
             "agent.run",
-            "run_turn",
+            "run_turn_from_event" if source_event is not None else "run_turn",
             {
                 "umo": target,
                 "input_message": tuple(input_message),
                 "send_to_user": send_to_user,
                 "session_id": session_id,
                 "metadata": metadata,
-                "source_event_id": event._source_token
-                if event is not None and event.umo == target
-                else None,
+                "source_event_id": source_id,
             },
         )
         return AgentRun(self._ctx, run_id)

@@ -703,7 +703,10 @@ Question / Answer 类型位于 `astrbot_sdk.decision`，支持 choice、boolean�
 `ctx.agent.run_turn(input_message=[PlainInput("你好")], umo=event.umo)` 向会话
 提交一轮，沿用会话配置。声明 `agent.run`。输入、输出及运行事件类型位于
 `astrbot_sdk.agents`。图片和文件输入使用 HTTP(S) URL 或上传后得到的
-`AssetRef`。调用返回 `AgentRun`，可等待 `result()`、迭代 `events()`，
+`AssetRef`。默认继承同一 UMO 下当前事件的身份。也可以传
+`source_event=event` 显式指定来源，省略 `umo` 时使用该事件的 UMO。
+显式指定的事件须由 Host 提供，且仍处于处理期间。
+调用返回 `AgentRun`，可等待 `result()`、迭代 `events()`，
 或者调用 `get_session()`、`cancel()`、`follow_up()` 和 `steer()`。steer 被接收后
 返回可等待的消费回执。默认由 Core 投递回复。设置 `send_to_user=False` 时，
 通过 `output.ready` 获取准备好的输出。传入的 JSON `metadata` 在该轮事件上
