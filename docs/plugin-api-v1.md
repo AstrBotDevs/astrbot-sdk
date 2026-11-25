@@ -50,7 +50,6 @@ from astrbot_sdk import MessageEvent, Plugin, PluginContext, UMO, hooks, lifecyc
 领域类型从稳定子模块导入：
 
 ```python
-from astrbot_sdk.config import PluginConfig
 from astrbot_sdk.events import MessageType, SenderRole
 from astrbot_sdk.message_components import At, Image, Plain, Record, Reply
 from astrbot_sdk.messages import MessageChain
@@ -62,11 +61,7 @@ from astrbot_sdk.results import EventResult, MessageResult, Propagation
 ## Plugin
 
 ```python
-ConfigT = TypeVar("ConfigT", bound=PluginConfig)
-
-
-class Plugin(Generic[ConfigT]):
-    config_model: ClassVar[type[ConfigT] | None]
+class Plugin[ConfigT]:
     ctx: PluginContext[ConfigT]
 
     @property
@@ -82,26 +77,40 @@ class Plugin(Generic[ConfigT]):
 - 一个 Runner 可以加载多个插件，但每个插件拥有独立实例、配置、存储和 capability。
 - handler 必须是插件实例的异步方法。
 
-### 类型化配置
+### 插件配置
 
-```python
-from pydantic import Field
+本地 SDK 插件在插件目录中提供 `_conf_schema.json`。AstrBot 使用同一份 schema
+生成后台表单，并把用户填写的值保存到 Host 的 `data/config/<插件安装名>_config.json`。
 
-from astrbot_sdk import Plugin
-from astrbot_sdk.config import PluginConfig
-
-
-class Config(PluginConfig):
-    greeting: str = Field(default="Hello", description="Reply prefix")
-
-
-class GreetingPlugin(Plugin[Config]):
-    config_model = Config
+```json
+{
+  "greeting": {"type": "string", "default": "Hello", "description": "Reply prefix"}
+}
 ```
 
-`PluginConfig` 基于 Pydantic v2。Host 使用 JSON Schema 生成配置界面，并在配置进入 Runner 前完成校验。
+```python
+from typing import TypedDict
 
-没有配置的插件省略泛型参数和 `config_model`。新版插件只读取自己的类型化配置，不读取 AstrBot 全局配置。
+from astrbot_sdk import MessageEvent, Plugin, on
+
+
+class GreetingConfig(TypedDict):
+    greeting: str
+
+
+class GreetingPlugin(Plugin[GreetingConfig]):
+    @on.command("greet")
+    async def greet(self, event: MessageEvent):
+        yield event.reply(self.config["greeting"])
+```
+
+Host 以普通字典把配置传给 Runner。`self.config` 和 `self.ctx.config` 读取同一份
+配置值。后台保存后，已连接的 Runner 会收到更新，并触发
+`lifecycle.config_changed`。未提供 schema 或配置值的插件会收到 `None`。
+
+外部 Runner 使用相同的值文件，文件名使用 Host 的插件登记名。登记信息中可用
+`config_schema_path` 指定 Host 上的 `_conf_schema.json`，相对路径从
+`data/config/` 解析。
 
 ## 注册模型
 

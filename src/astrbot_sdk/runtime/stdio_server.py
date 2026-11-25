@@ -299,6 +299,13 @@ class StdioPluginServer:
             return {"protocol_version": PROTOCOL_VERSION}
         if frame.method == "initialize":
             return await self._initialize(frame)
+        if frame.method == "reconfigure":
+            if self.loaded_plugin is None:
+                raise InvalidRequest("Runner is not initialized")
+            await self.loaded_plugin.reconfigure(
+                decode_value(frame.params.get("config"))
+            )
+            return None
         if frame.method == "invoke_tool":
             if self.loaded_plugin is None:
                 raise InvalidRequest("Runner is not initialized")

@@ -515,6 +515,14 @@ class StdioPluginClient:
         """Probe Runner liveness; returns its protocol version payload."""
         return await self._request("ping", {})
 
+    async def reconfigure(self, config: Any) -> None:
+        """Replace the configuration of the loaded plugin.
+
+        Args:
+            config: Values loaded from the Host's plugin configuration file.
+        """
+        await self._request("reconfigure", {"config": encode_value(config)})
+
     async def session_consider(
         self,
         event: Any,

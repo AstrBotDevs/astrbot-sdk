@@ -108,10 +108,20 @@ runtime:
 {
   "listen": "127.0.0.1:6195",
   "plugins": [
-    { "name": "my_plugin", "plugin_id": "xxx", "token": "...", "capabilities": [] }
+    {
+      "name": "my_plugin",
+      "plugin_id": "xxx",
+      "token": "...",
+      "capabilities": [],
+      "config_schema_path": "plugin_schemas/my_plugin/_conf_schema.json"
+    }
   ]
 }
 ```
+
+`config_schema_path` 为可选字段，从 Host 的 `data/config/` 解析。用户填写的配置
+存放在 `data/config/my_plugin_config.json`。如果登记文件已有内联 `config`，Host
+会在独立值文件尚未建立时导入一次。之后以独立值文件为准。
 
 适合验证"Core 与插件不同机部署"的场景。一般用不到，可跳过。
 
