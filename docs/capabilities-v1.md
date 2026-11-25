@@ -166,7 +166,7 @@ class PluginContext(Generic[ConfigT]):
     llm: LLMService
     conversations: ConversationService
     personas: PersonaService
-    render: RenderService
+    t2i: RenderService
     scheduler: SchedulerService
     web: WebService
     tools: ToolService
@@ -382,7 +382,11 @@ class PersonaService:
     async def list(self) -> list[PersonaInfo]: ...
 ```
 
-### 渲染
+### HTML 和文本转图片
+
+使用 `await ctx.t2i.html(template, data)` 渲染 HTML 模板，或用
+`await ctx.t2i.text(text)` 渲染文本。两者都返回 `AssetRef`，所需 capability 为
+`render.image`。
 
 ```python
 class RenderService:
@@ -512,7 +516,7 @@ class PluginRegistryService:
 | `conversation_manager` | `ctx.conversations` |
 | `persona_manager` | `ctx.personas` |
 | `event.bot.api.call_action` | 无对应 SDK 接口 |
-| `html_render`、`text_to_image` | `ctx.render.html`、`ctx.render.text` |
+| `html_render`、`text_to_image` | `ctx.t2i.html`、`ctx.t2i.text` |
 | `put_kv_data`、`get_kv_data`、`delete_kv_data` | `ctx.storage.set/get/delete` |
 | `StarTools.get_data_dir` | `ctx.storage.data_dir` |
 | `register_web_api` | `ctx.web.register` 或 Web route decorator |

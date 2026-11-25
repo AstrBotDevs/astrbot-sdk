@@ -23,7 +23,7 @@ The current minimum implementation includes:
   segment types (Face and Forward included);
 - `on.message` handlers (message.receive) with host-side filter compilation
   (message types, platforms, roles, regex);
-- `ctx.plugins` (plugin.inspect) and `ctx.render` (render.image) services;
+- `ctx.plugins` (plugin.inspect) and `ctx.t2i` (render.image) services;
 - `on.tool` static LLM tools and `ctx.tools` dynamic tool registration
   (llm.tool.register) with annotation-derived parameter schemas;
 - `ctx.llm` (llm.generate): provider queries, one-shot generate, and
