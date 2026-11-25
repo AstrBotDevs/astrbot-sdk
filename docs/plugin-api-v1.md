@@ -32,7 +32,7 @@ from astrbot_sdk import MessageEvent, Plugin, on
 class HelloPlugin(Plugin):
     @on.command("hello")
     async def hello(self, event: MessageEvent):
-        yield event.reply(f"Hello, {event.sender.name}!")
+        yield event.reply(f"Hello, {event.get_sender_name()}!")
 ```
 
 `metadata.yaml` 的 `runtime.entrypoint` 指向一个 `Plugin` 子类。Runner 为每个插件创建一个实例，并在调用生命周期方法和 handler 前注入 `self.ctx`。
@@ -236,7 +236,7 @@ async def weather_message(self, event: MessageEvent):
 - 空 collection 表示不限制该字段。
 - 没有任何条件时接收所有普通平台消息。
 - `platforms` 使用适配器类型字符串，不使用用户配置的实例 ID。
-- `regex` 由 Host 对规范化后的 `event.text` 执行。
+- `regex` 由 Host 对 `event.message_str.strip()` 执行。
 - 传入已编译的 `Pattern` 时，SDK 序列化 pattern 和 flags。
 - Host 完成过滤后才把事件发送给 Runner。
 - 第一阶段不接受 callable、lambda 或自定义 Python filter。
@@ -433,17 +433,34 @@ class MessageEvent:
     platform_type: str
     message_ref: MessageRef
     message: MessageChain
-    text: str
     sender: Sender
     timestamp: datetime
     command: CommandInvocation | None
     is_wake: bool
 
     @property
+    def message_str(self) -> str: ...
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def role(self) -> str: ...
+
+    @property
     def is_private(self) -> bool: ...
 
     @property
     def is_group(self) -> bool: ...
+
+    def get_message_str(self) -> str: ...
+    def get_messages(self) -> list[MessageSegment]: ...
+    def get_sender_id(self) -> str: ...
+    def get_sender_name(self) -> str: ...
+    def get_message_type(self) -> MessageType: ...
+    def is_private_chat(self) -> bool: ...
+    def get_platform_name(self) -> str: ...
+    def get_platform_id(self) -> str: ...
 
     def reply(
         self,
@@ -456,22 +473,22 @@ class MessageEvent:
     def stop(self) -> EventResult: ...
 ```
 
-常用数据使用只读属性：
+消息处理器可以使用与 Core 一致的读取接口：
 
 ```python
-event.text
-event.sender.id
-event.sender.name
-event.sender.role
-event.umo.platform_id
-event.umo.message_type
-event.umo.session_id
-event.platform_type
+event.message_str
+event.get_sender_id()
+event.get_sender_name()
+event.role
+event.is_private_chat()
+event.get_platform_name()
+event.get_platform_id()
+event.unified_msg_origin
 ```
 
-`event.message` 是适配器解析后的入站消息段序列。Host 将 AstrBot 消息链逐段序列化为 SDK DTO，保留顺序和可公开字段。
+`event.message_str` 和 `event.get_message_str()` 返回 Host 转换事件时的 Core 文本。`event.text` 拼接顶层 `Plain` 段。如果收到的事件缺少 Core 文本，`message_str` 使用消息段拼接的文本。
 
-`event.text` 只是把顶层 `Plain` 段连接后的便捷视图。读取 `At`、`Reply`、`Record` 等内容时应遍历 `event.message`。
+`event.message` 保留入站消息段的顺序。`event.get_messages()` 返回 SDK 消息段的列表副本，便于读取 `At`、`Reply`、`Record` 等内容。`event.get_message_type()` 返回 SDK 的 `MessageType`。
 
 不提供：
 
@@ -672,12 +689,14 @@ Host 错误通过 stdio 和 WebSocket 映射为相同的 SDK 异常。
 | `filter.llm_tool` | `on.tool` |
 | Pipeline hook 装饰器 | `hooks.*` |
 | `initialize()`、`terminate()` | `lifecycle.startup`、`lifecycle.shutdown` |
-| `event.message_str` | `event.text` |
-| `event.get_sender_name()` | `event.sender.name` |
+| `event.message_str`、`event.get_message_str()` | `event.message_str`、`event.get_message_str()` |
+| `event.get_messages()`、`event.get_message_type()` | 同名方法，返回 SDK 消息段或枚举 |
+| `event.get_sender_id()`、`event.get_sender_name()`、`event.role` | 同名接口 |
+| `event.is_private_chat()`、`event.get_platform_name()`、`event.get_platform_id()` | 同名方法 |
 | `event.plain_result(text)` | `event.reply(text)` 或直接返回、`yield` 文本 |
 | `event.chain_result(chain)` | `event.reply(chain)` 或直接返回、`yield` `MessageChain` |
 | `event.image_result(path)` | `event.reply(Image.from_file(path))` |
-| `event.unified_msg_origin`、`event.session` | `event.umo` |
+| `event.unified_msg_origin`、`event.session` | `event.unified_msg_origin`、`event.umo` |
 | `event.send(...)` | `ctx.messages.send(event.umo, ...)` |
 | Host manager、Provider、Platform 对象 | 对应的类型化 `ctx.*` 服务 |
 

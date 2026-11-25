@@ -302,6 +302,7 @@ def encode_message_event(event: MessageEvent) -> dict[str, JSONValue]:
         "platform_type": event.platform_type,
         "message_ref": {"id": event.message_ref.id},
         "message": encode_message_chain(event.message, allow_unknown=True),
+        "message_str": event._message_str,
         "sender": {
             "id": event.sender.id,
             "name": event.sender.name,
@@ -332,9 +333,12 @@ def decode_message_event(data: Mapping[str, Any]) -> MessageEvent:
         message_ref = data["message_ref"]
         sender = data["sender"]
         message = data["message"]
+        message_str = data.get("message_str")
         if not all(
             isinstance(item, Mapping) for item in (umo, message_ref, sender)
         ) or not isinstance(message, list):
+            raise TypeError
+        if message_str is not None and not isinstance(message_str, str):
             raise TypeError
 
         command_data = data.get("command")
@@ -370,6 +374,7 @@ def decode_message_event(data: Mapping[str, Any]) -> MessageEvent:
             is_wake=bool(data.get("is_wake", False)),
             _source_token=data.get("source_token"),
             agent_metadata=dict(data.get("agent_metadata", {})),
+            _message_str=message_str,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidRequest("invalid MessageEvent payload") from exc

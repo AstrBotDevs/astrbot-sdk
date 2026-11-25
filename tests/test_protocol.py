@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -74,13 +75,20 @@ def test_protocol_frame_round_trip(frame: object) -> None:
     assert decode_frame(encode_frame(frame)) == frame
 
 
-def test_message_event_round_trip() -> None:
-    event = make_event()
+@pytest.mark.parametrize("core_text", [None, "hello @Moon", ""])
+def test_message_event_round_trip(core_text: str | None) -> None:
+    event = replace(make_event(), _message_str=core_text)
 
-    decoded = decode_message_event(encode_message_event(event))
+    payload = encode_message_event(event)
+    assert payload["message_str"] == core_text
+    if core_text is None:
+        del payload["message_str"]
+    decoded = decode_message_event(payload)
 
     assert decoded == event
-    assert decoded.message.text == "hello"
+    assert decoded.text == "hello"
+    assert decoded.message_str == ("hello" if core_text is None else core_text)
+    assert decoded.get_message_str() == decoded.message_str
 
 
 def test_message_result_round_trip() -> None:
